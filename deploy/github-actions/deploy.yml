@@ -1,0 +1,101 @@
+# Example workflow showing how a production deployment job integrates
+# with Waypoint's production gate. Copy this into .github/workflows/ in
+# the service's own repository and adjust the build/push steps for that
+# service.
+#
+# Required repository secrets (Settings -> Secrets and variables ->
+# Actions), scoped only to this repo/environment — never commit real
+# values:
+#   WAYPOINT_API_URL   e.g. https://waypoint.internal.example.com
+#   WAYPOINT_CI_TOKEN   a per-project CI token minted via
+#                        POST /api/v1/projects/{projectID}/ci-tokens
+#
+# Required workflow inputs (adjust to how your pipeline identifies a
+# release): WAYPOINT_RELEASE_ID, the UUID of the Waypoint release this
+# deployment belongs to.
+
+name: Deploy to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: "Waypoint release ID"
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Waypoint production eligibility
+        id: gate
+        env:
+          WAYPOINT_API_URL: ${{ secrets.WAYPOINT_API_URL }}
+          WAYPOINT_CI_TOKEN: ${{ secrets.WAYPOINT_CI_TOKEN }}
+          RELEASE_ID: ${{ github.event.inputs.release_id }}
+        run: |
+          set -euo pipefail
+          response="$(curl -sS -w '\n%{http_code}' \
+            -H "Authorization: Bearer ${WAYPOINT_CI_TOKEN}" \
+            "${WAYPOINT_API_URL}/api/v1/ci/releases/${RELEASE_ID}/eligibility")"
+          status="$(echo "$response" | tail -n1)"
+          body="$(echo "$response" | sed '$d')"
+          echo "Waypoint eligibility response: $body"
+          if [ "$status" != "200" ]; then
+            echo "Waypoint eligibility check failed with HTTP $status"
+            exit 1
+          fi
+          eligible="$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["eligible"])')"
+          if [ "$eligible" != "True" ]; then
+            echo "Release $RELEASE_ID is not eligible for production. Blockers:"
+            echo "$body" | python3 -c 'import json,sys; [print("-", b) for b in json.load(sys.stdin)["blockers"]]'
+            exit 1
+          fi
+          echo "Release is eligible for production."
+
+      # --- Your actual build/push/deploy steps go here. ---
+      # This example just shows the digest-capturing shape; replace with
+      # your real build and deploy commands.
+      - name: Build and push image
+        id: build
+        run: |
+          set -euo pipefail
+          # digest="$(docker build -q . | ...)"
+          # docker push your-registry/your-service:${{ github.sha }}
+          digest="sha256:REPLACE_WITH_REAL_IMMUTABLE_DIGEST"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy
+        id: deploy
+        run: |
+          echo "Deploying ${{ steps.build.outputs.digest }}..."
+          # kubectl set image ... / your actual deploy command
+
+      - name: Record deployment result in Waypoint
+        if: always()
+        env:
+          WAYPOINT_API_URL: ${{ secrets.WAYPOINT_API_URL }}
+          WAYPOINT_CI_TOKEN: ${{ secrets.WAYPOINT_CI_TOKEN }}
+          RELEASE_ID: ${{ github.event.inputs.release_id }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          RESULT: ${{ job.status == 'success' && 'success' || 'failure' }}
+        run: |
+          set -euo pipefail
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${WAYPOINT_CI_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${WAYPOINT_API_URL}/api/v1/ci/releases/${RELEASE_ID}/deployments" \
+            -d "$(python3 -c '
+import json, os, sys
+print(json.dumps({
+    "environment": "production",
+    "artifact_digest": os.environ["DIGEST"],
+    "commit_sha": os.environ.get("GITHUB_SHA", ""),
+    "workflow_run_url": f"{os.environ[\"GITHUB_SERVER_URL\"]}/{os.environ[\"GITHUB_REPOSITORY\"]}/actions/runs/{os.environ[\"GITHUB_RUN_ID\"]}",
+    "result": os.environ["RESULT"],
+}))
+')"

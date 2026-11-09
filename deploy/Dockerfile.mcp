@@ -1,0 +1,16 @@
+# Builds cmd/mcp. This image is provided for completeness; the MCP
+# server is normally run as a local subprocess that Claude Code starts
+# over stdio (see the MCP setup section of the README and
+# .mcp.json.example), not as a long-running container.
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/mcp ./cmd/mcp
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=build /out/mcp /usr/local/bin/mcp
+USER nobody
+ENTRYPOINT ["/usr/local/bin/mcp"]

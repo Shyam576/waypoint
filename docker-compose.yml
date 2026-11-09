@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: waypoint
+      POSTGRES_PASSWORD: waypoint
+      POSTGRES_DB: waypoint
+    # Not published to the host by default, since many dev machines
+    # already run Postgres on 5432. The api/web services reach it over
+    # the compose network as db:5432. Uncomment with a non-conflicting
+    # host port (e.g. "5433:5432") if you want to connect a local client.
+    # ports:
+    #   - "5433:5432"
+    volumes:
+      - waypoint_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U waypoint"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://waypoint:waypoint@db:5432/waypoint?sslmode=disable
+      WAYPOINT_HTTP_ADDR: ":8080"
+      WAYPOINT_CORS_ORIGIN: http://localhost:3000
+      WAYPOINT_COOKIE_SECURE: "false"
+      ADMIN_BOOTSTRAP_TOKEN: ${ADMIN_BOOTSTRAP_TOKEN:-}
+    ports:
+      - "${WAYPOINT_API_HOST_PORT:-8080}:8080"
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+      # Next.js bakes this into the build (see the comment in
+      # Dockerfile.web); it is not a runtime environment variable here.
+      args:
+        WAYPOINT_API_URL: http://api:8080
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${WAYPOINT_WEB_HOST_PORT:-3000}:3000"
+
+volumes:
+  waypoint_db_data:

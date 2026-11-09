@@ -1,0 +1,28 @@
+# Builds the Next.js app using the standalone output mode, so the
+# runtime image only needs the compiled server bundle, not node_modules
+# or the source tree.
+#
+# WAYPOINT_API_URL must be a build ARG, not a runtime environment
+# variable: Next.js resolves next.config.js's rewrites() once during
+# `next build` and bakes the result into .next/routes-manifest.json, so
+# setting it only at `docker run`/compose runtime has no effect. Rebuild
+# the image (with a different --build-arg) to point it at a different
+# backend.
+FROM node:22-alpine AS build
+ARG WAYPOINT_API_URL=http://api:8080
+ENV WAYPOINT_API_URL=$WAYPOINT_API_URL
+WORKDIR /src
+COPY web/package.json web/package-lock.json* ./
+RUN npm install
+COPY web/ .
+RUN npm run build
+
+FROM node:22-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /src/.next/standalone ./
+COPY --from=build /src/.next/static ./.next/static
+COPY --from=build /src/public ./public
+EXPOSE 3000
+USER node
+ENTRYPOINT ["node", "server.js"]
