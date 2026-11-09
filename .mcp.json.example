@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "waypoint": {
+      "command": "go",
+      "args": ["run", "./cmd/mcp"],
+      "cwd": "/absolute/path/to/waypoint",
+      "env": {
+        "WAYPOINT_API_BASE_URL": "http://localhost:8080",
+        "WAYPOINT_MCP_TOKEN": "REPLACE_WITH_YOUR_PER_USER_MCP_TOKEN"
+      }
+    }
+  }
+}
