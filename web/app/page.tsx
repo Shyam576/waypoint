@@ -13,5 +13,5 @@ export default function HomePage() {
     router.replace(user ? '/dashboard' : '/login');
   }, [loading, user, router]);
 
-  return <div className="p-8 text-sm text-slate-500">Loading…</div>;
+  return <div className="flex min-h-screen items-center justify-center text-sm text-slate-500">Loading…</div>;
 }
