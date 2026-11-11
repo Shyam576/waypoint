@@ -23,7 +23,7 @@ function Section({ title, children, right }: { title: string; children: React.Re
   return (
     <section className="space-y-2">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">{title}</h2>
+        <h2 className="section-title">{title}</h2>
         {right}
       </div>
       {children}
@@ -73,16 +73,16 @@ function ReleaseDetailContent() {
       {error && <ErrorState message={error} />}
       {notice && <SuccessBanner message={notice} />}
 
-      <div className="flex items-start justify-between">
+      <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold text-slate-900">{release.name}</h1>
-          <p className="mt-1 text-sm text-slate-600">{release.summary || 'No summary provided.'}</p>
+          <h1 className="page-title">{release.name}</h1>
+          <p className="page-subtitle">{release.summary || 'No summary provided.'}</p>
         </div>
         <StageBadge stage={release.stage} />
       </div>
 
       <Section title="Stage">
-        <div className="flex flex-wrap items-center gap-2 rounded border border-slate-200 bg-white p-4">
+        <div className="card flex flex-wrap items-center gap-2">
           <span className="text-sm text-slate-600">Current: </span>
           <StageBadge stage={release.stage} />
           {canTransition &&
@@ -90,7 +90,7 @@ function ReleaseDetailContent() {
               <button
                 key={next}
                 onClick={() => run(() => api.post(`/api/v1/releases/${releaseId}/transition`, { to_stage: next }))}
-                className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100"
+                className="btn-secondary btn-sm"
               >
                 Move to {next.replace(/_/g, ' ')}
               </button>
@@ -98,7 +98,7 @@ function ReleaseDetailContent() {
           {canTransition && release.stage !== 'closed' && (
             <button
               onClick={() => run(() => api.post(`/api/v1/releases/${releaseId}/close`, { reason: 'closed from web app' }), 'Release closed.')}
-              className="rounded border border-red-300 px-2 py-1 text-xs text-red-700 hover:bg-red-50"
+              className="btn-danger-ghost btn-sm"
             >
               Close release
             </button>
@@ -107,8 +107,11 @@ function ReleaseDetailContent() {
       </Section>
 
       <Section title="Production eligibility">
-        <div className={`rounded border p-4 ${eligibility.eligible ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
-          <div className="mb-2 font-medium">{eligibility.eligible ? 'Eligible for production' : 'Not eligible for production'}</div>
+        <div className={`card ${eligibility.eligible ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+          <div className="mb-2 flex items-center gap-2 font-medium text-slate-900">
+            <span className={`h-2 w-2 rounded-full ${eligibility.eligible ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+            {eligibility.eligible ? 'Eligible for production' : 'Not eligible for production'}
+          </div>
           {eligibility.blockers.length > 0 && (
             <ul className="list-inside list-disc space-y-1 text-sm text-slate-700">
               {eligibility.blockers.map((b, i) => (
@@ -162,32 +165,26 @@ function LinksSection({
       {links.length === 0 ? (
         <EmptyState label="No links yet." />
       ) : (
-        <ul className="space-y-1 rounded border border-slate-200 bg-white p-4 text-sm">
+        <ul className="card space-y-2 text-sm">
           {links.map((l) => (
-            <li key={l.id}>
-              <span className="mr-2 inline-block rounded bg-slate-100 px-1.5 py-0.5 text-xs">{l.link_type}</span>
-              <a href={l.url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">
+            <li key={l.id} className="flex items-center gap-2">
+              <span className="chip bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200">{l.link_type.replace(/_/g, ' ')}</span>
+              <a href={l.url} target="_blank" rel="noreferrer" className="truncate text-brand-600 hover:underline">
                 {l.label || l.url}
               </a>
             </li>
           ))}
         </ul>
       )}
-      <form onSubmit={handleAdd} className="flex flex-wrap gap-2">
-        <select value={linkType} onChange={(e) => setLinkType(e.target.value as LinkType)} className="rounded border border-slate-300 px-2 py-1 text-sm">
+      <form onSubmit={handleAdd} className="card flex flex-wrap gap-2">
+        <select value={linkType} onChange={(e) => setLinkType(e.target.value as LinkType)} className="input w-auto">
           <option value="pull_request">Pull request</option>
           <option value="commit">Commit</option>
           <option value="work_item">Work item</option>
           <option value="ci_run">CI run</option>
         </select>
-        <input
-          required
-          placeholder="https://…"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
-        />
-        <button type="submit" className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800">
+        <input required placeholder="https://…" value={url} onChange={(e) => setUrl(e.target.value)} className="input flex-1" />
+        <button type="submit" className="btn-primary">
           Add link
         </button>
       </form>
@@ -229,30 +226,37 @@ function EvidenceSection({
   return (
     <Section title="Evidence">
       {error && <ErrorState message={error} />}
-      <div className="flex flex-wrap gap-2 text-xs">
+      <div className="flex flex-wrap gap-2">
         {requiredTypes.map((t) => (
-          <span key={t} className={`rounded px-2 py-1 ${presentTypes.has(t as EvidenceType) ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}`}>
-            {presentTypes.has(t as EvidenceType) ? '✓' : '○'} {t}
+          <span
+            key={t}
+            className={`chip ${
+              presentTypes.has(t as EvidenceType)
+                ? 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200'
+                : 'bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200'
+            }`}
+          >
+            {presentTypes.has(t as EvidenceType) ? '✓' : '○'} {t.replace(/_/g, ' ')}
           </span>
         ))}
       </div>
       {evidence.length === 0 ? (
         <EmptyState label="No evidence submitted yet." />
       ) : (
-        <ul className="space-y-2 rounded border border-slate-200 bg-white p-4 text-sm">
+        <ul className="card space-y-2 text-sm">
           {evidence.map((e) => (
             <li key={e.id} className="border-b border-slate-100 pb-2 last:border-0 last:pb-0">
-              <div className="font-medium">
-                {e.title} <span className="text-xs text-slate-400">({e.type})</span>
+              <div className="font-medium text-slate-900">
+                {e.title} <span className="text-xs text-slate-400">({e.type.replace(/_/g, ' ')})</span>
               </div>
               {e.notes && <div className="text-slate-600">{e.notes}</div>}
             </li>
           ))}
         </ul>
       )}
-      <form onSubmit={handleSubmit} className="space-y-2 rounded border border-slate-200 bg-white p-4">
+      <form onSubmit={handleSubmit} className="card space-y-2">
         <div className="flex gap-2">
-          <select value={type} onChange={(e) => setType(e.target.value as EvidenceType)} className="rounded border border-slate-300 px-2 py-1 text-sm">
+          <select value={type} onChange={(e) => setType(e.target.value as EvidenceType)} className="input w-auto">
             <option value="change_summary">Change summary</option>
             <option value="test_results">Test results</option>
             <option value="uat_signoff">UAT sign-off</option>
@@ -260,22 +264,10 @@ function EvidenceSection({
             <option value="security_review">Security review</option>
             <option value="other">Other</option>
           </select>
-          <input
-            required
-            placeholder="Title"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
-          />
+          <input required placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} className="input flex-1" />
         </div>
-        <textarea
-          placeholder="Notes"
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          rows={2}
-          className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-        />
-        <button type="submit" className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800">
+        <textarea placeholder="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className="input" />
+        <button type="submit" className="btn-primary">
           Submit evidence
         </button>
       </form>
@@ -314,29 +306,24 @@ function ApprovalsSection({
       {approvals.length === 0 ? (
         <EmptyState label="No approval decisions yet." />
       ) : (
-        <ul className="space-y-2 rounded border border-slate-200 bg-white p-4 text-sm">
+        <ul className="card space-y-2 text-sm">
           {approvals.map((a) => (
-            <li key={a.id} className="flex items-center justify-between">
-              <div>
-                <StatusBadge value={a.decision} /> <span className="ml-2 text-slate-600">{a.comment}</span>
+            <li key={a.id} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2 last:border-0 last:pb-0">
+              <div className="flex min-w-0 items-center gap-2">
+                <StatusBadge value={a.decision} /> <span className="truncate text-slate-600">{a.comment}</span>
               </div>
-              <span className="text-xs text-slate-400">{new Date(a.decided_at).toLocaleString()}</span>
+              <span className="whitespace-nowrap text-xs text-slate-400">{new Date(a.decided_at).toLocaleString()}</span>
             </li>
           ))}
         </ul>
       )}
       {canApprove && (
-        <div className="flex gap-2 rounded border border-slate-200 bg-white p-4">
-          <input
-            placeholder="Comment"
-            value={comment}
-            onChange={(e) => setComment(e.target.value)}
-            className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
-          />
-          <button onClick={() => decide('approved')} className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700">
+        <div className="card flex gap-2">
+          <input placeholder="Comment" value={comment} onChange={(e) => setComment(e.target.value)} className="input flex-1" />
+          <button onClick={() => decide('approved')} className="btn-success">
             Approve
           </button>
-          <button onClick={() => decide('rejected')} className="rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700">
+          <button onClick={() => decide('rejected')} className="btn-danger">
             Reject
           </button>
         </div>
@@ -383,7 +370,7 @@ function ChangesSection({ releaseId, detail, onChanged }: { releaseId: string; d
           {detail.change_notes.length === 0 ? (
             <EmptyState label="None yet." />
           ) : (
-            <ul className="space-y-2 rounded border border-slate-200 bg-white p-3 text-sm">
+            <ul className="card space-y-2 text-sm">
               {detail.change_notes.map((c) => (
                 <li key={c.id}>
                   {c.summary} <span className="text-xs text-slate-400">({c.source})</span>
@@ -392,14 +379,8 @@ function ChangesSection({ releaseId, detail, onChanged }: { releaseId: string; d
             </ul>
           )}
           <form onSubmit={addChangeNote} className="flex gap-2">
-            <input
-              required
-              placeholder="What changed?"
-              value={summary}
-              onChange={(e) => setSummary(e.target.value)}
-              className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
-            />
-            <button type="submit" className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800">
+            <input required placeholder="What changed?" value={summary} onChange={(e) => setSummary(e.target.value)} className="input flex-1" />
+            <button type="submit" className="btn-primary">
               Add
             </button>
           </form>
@@ -409,7 +390,7 @@ function ChangesSection({ releaseId, detail, onChanged }: { releaseId: string; d
           {detail.design_decisions.length === 0 ? (
             <EmptyState label="None yet." />
           ) : (
-            <ul className="space-y-2 rounded border border-slate-200 bg-white p-3 text-sm">
+            <ul className="card space-y-2 text-sm">
               {detail.design_decisions.map((d) => (
                 <li key={d.id}>
                   {d.decision} <span className="text-xs text-slate-400">({d.source})</span>
@@ -423,9 +404,9 @@ function ChangesSection({ releaseId, detail, onChanged }: { releaseId: string; d
               placeholder="What was decided?"
               value={decision}
               onChange={(e) => setDecision(e.target.value)}
-              className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
+              className="input flex-1"
             />
-            <button type="submit" className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800">
+            <button type="submit" className="btn-primary">
               Add
             </button>
           </form>
@@ -463,15 +444,15 @@ function PendingMCPSection({
       {error && <ErrorState message={error} />}
       <ul className="space-y-3">
         {pending.map((s) => (
-          <li key={s.id} className="rounded border border-amber-200 bg-amber-50 p-4">
-            <div className="mb-1 text-xs font-medium uppercase text-amber-700">{s.type.replace(/_/g, ' ')}</div>
-            <pre className="whitespace-pre-wrap text-xs text-slate-700">{JSON.stringify(s.payload, null, 2)}</pre>
+          <li key={s.id} className="rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-card">
+            <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-700">{s.type.replace(/_/g, ' ')}</div>
+            <pre className="whitespace-pre-wrap rounded-lg bg-white/60 p-2 text-xs text-slate-700">{JSON.stringify(s.payload, null, 2)}</pre>
             {canReview && (
               <div className="mt-2 flex gap-2">
-                <button onClick={() => act(s.id, true)} className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700">
+                <button onClick={() => act(s.id, true)} className="btn-success btn-sm">
                   Accept
                 </button>
-                <button onClick={() => act(s.id, false)} className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700">
+                <button onClick={() => act(s.id, false)} className="btn-danger btn-sm">
                   Reject
                 </button>
               </div>
@@ -524,11 +505,11 @@ function DeploymentsSection({
       {deployments.length === 0 ? (
         <EmptyState label="No deployments recorded yet." />
       ) : (
-        <ul className="space-y-2 rounded border border-slate-200 bg-white p-4 text-sm">
+        <ul className="card space-y-2 text-sm">
           {deployments.map((d) => (
-            <li key={d.id} className="flex items-center justify-between border-b border-slate-100 pb-2 last:border-0 last:pb-0">
-              <div>
-                <div className="font-mono text-xs">{d.artifact_digest}</div>
+            <li key={d.id} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2 last:border-0 last:pb-0">
+              <div className="min-w-0">
+                <div className="truncate font-mono text-xs text-slate-700">{d.artifact_digest}</div>
                 <div className="text-xs text-slate-500">
                   {d.environment} · {d.recorded_via} · {new Date(d.occurred_at).toLocaleString()}
                 </div>
@@ -539,38 +520,26 @@ function DeploymentsSection({
         </ul>
       )}
       {canRecord && (
-        <form onSubmit={handleSubmit} className="space-y-2 rounded border border-slate-200 bg-white p-4">
+        <form onSubmit={handleSubmit} className="card space-y-2">
           <p className="text-xs text-slate-500">
             CI pipelines should record production deployments via the CI token endpoint; this manual form is for
             admins/coordinators backfilling or correcting a record.
           </p>
           <div className="flex gap-2">
-            <select value={environment} onChange={(e) => setEnvironment(e.target.value as Environment)} className="rounded border border-slate-300 px-2 py-1 text-sm">
+            <select value={environment} onChange={(e) => setEnvironment(e.target.value as Environment)} className="input">
               <option value="development">Development</option>
               <option value="uat">UAT</option>
               <option value="staging">Staging</option>
               <option value="production">Production</option>
             </select>
-            <select value={result} onChange={(e) => setResult(e.target.value as DeploymentResult)} className="rounded border border-slate-300 px-2 py-1 text-sm">
+            <select value={result} onChange={(e) => setResult(e.target.value as DeploymentResult)} className="input">
               <option value="success">Success</option>
               <option value="failure">Failure</option>
             </select>
           </div>
-          <input
-            required
-            placeholder="Artifact digest (sha256:…)"
-            value={digest}
-            onChange={(e) => setDigest(e.target.value)}
-            className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-          />
-          <input
-            required
-            placeholder="Workflow run URL"
-            value={runUrl}
-            onChange={(e) => setRunUrl(e.target.value)}
-            className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
-          />
-          <button type="submit" className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800">
+          <input required placeholder="Artifact digest (sha256:…)" value={digest} onChange={(e) => setDigest(e.target.value)} className="input" />
+          <input required placeholder="Workflow run URL" value={runUrl} onChange={(e) => setRunUrl(e.target.value)} className="input" />
+          <button type="submit" className="btn-primary">
             Record deployment
           </button>
         </form>
@@ -616,22 +585,18 @@ function SupportSection({ releaseId, items, onChanged }: { releaseId: string; it
       {items.length === 0 ? (
         <EmptyState label="No support items yet." />
       ) : (
-        <ul className="space-y-2 rounded border border-slate-200 bg-white p-4 text-sm">
+        <ul className="card space-y-2 text-sm">
           {items.map((it) => (
-            <li key={it.id} className="flex items-center justify-between border-b border-slate-100 pb-2 last:border-0 last:pb-0">
-              <div>
-                <div className="font-medium">{it.summary}</div>
+            <li key={it.id} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2 last:border-0 last:pb-0">
+              <div className="min-w-0">
+                <div className="font-medium text-slate-900">{it.summary}</div>
                 <div className="mt-1 flex gap-2">
                   <SeverityBadge severity={it.severity} />
                   <StatusBadge value={it.status} />
                 </div>
               </div>
               {it.status !== 'closed' && (
-                <select
-                  value={it.status}
-                  onChange={(e) => updateStatus(it.id, e.target.value, it)}
-                  className="rounded border border-slate-300 px-2 py-1 text-xs"
-                >
+                <select value={it.status} onChange={(e) => updateStatus(it.id, e.target.value, it)} className="input w-auto text-xs">
                   <option value="open">Open</option>
                   <option value="investigating">Investigating</option>
                   <option value="resolved">Resolved</option>
@@ -643,20 +608,14 @@ function SupportSection({ releaseId, items, onChanged }: { releaseId: string; it
         </ul>
       )}
       <form onSubmit={handleAdd} className="flex gap-2">
-        <select value={severity} onChange={(e) => setSeverity(e.target.value)} className="rounded border border-slate-300 px-2 py-1 text-sm">
+        <select value={severity} onChange={(e) => setSeverity(e.target.value)} className="input w-auto">
           <option value="low">Low</option>
           <option value="medium">Medium</option>
           <option value="high">High</option>
           <option value="critical">Critical</option>
         </select>
-        <input
-          required
-          placeholder="Issue summary"
-          value={summary}
-          onChange={(e) => setSummary(e.target.value)}
-          className="flex-1 rounded border border-slate-300 px-2 py-1 text-sm"
-        />
-        <button type="submit" className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800">
+        <input required placeholder="Issue summary" value={summary} onChange={(e) => setSummary(e.target.value)} className="input flex-1" />
+        <button type="submit" className="btn-primary">
           Add
         </button>
       </form>
@@ -670,16 +629,19 @@ function ActivitySection({ activity }: { activity: ReleaseDetail['activity'] }) 
       {activity.length === 0 ? (
         <EmptyState label="No activity yet." />
       ) : (
-        <ul className="space-y-2 rounded border border-slate-200 bg-white p-4 text-sm">
+        <ul className="card space-y-3 text-sm">
           {activity.map((a) => (
-            <li key={a.id} className="border-b border-slate-100 pb-2 last:border-0 last:pb-0">
-              <div className="flex justify-between">
-                <span className="font-medium">{a.action.replace(/_/g, ' ')}</span>
-                <span className="text-xs text-slate-400">{new Date(a.created_at).toLocaleString()}</span>
-              </div>
-              <div className="text-xs text-slate-500">
-                {a.actor_label}
-                {a.remarks ? ` — ${a.remarks}` : ''}
+            <li key={a.id} className="flex gap-3 border-b border-slate-100 pb-3 last:border-0 last:pb-0">
+              <div className="mt-1.5 h-2 w-2 flex-shrink-0 rounded-full bg-brand-500" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium capitalize text-slate-900">{a.action.replace(/_/g, ' ')}</span>
+                  <span className="whitespace-nowrap text-xs text-slate-400">{new Date(a.created_at).toLocaleString()}</span>
+                </div>
+                <div className="text-xs text-slate-500">
+                  {a.actor_label}
+                  {a.remarks ? ` — ${a.remarks}` : ''}
+                </div>
               </div>
             </li>
           ))}
