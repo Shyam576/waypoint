@@ -43,67 +43,44 @@ function NewReleaseContent() {
 
   return (
     <div className="mx-auto max-w-lg">
-      <h1 className="mb-4 text-xl font-semibold text-slate-900">New release</h1>
-      <form onSubmit={handleSubmit} className="space-y-4 rounded border border-slate-200 bg-white p-6">
+      <h1 className="page-title mb-4">New release</h1>
+      <form onSubmit={handleSubmit} className="card space-y-4">
         {error && <ErrorState message={error} />}
         <div>
-          <label className="block text-sm font-medium text-slate-700">Name / version</label>
-          <input required value={name} onChange={(e) => setName(e.target.value)} className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+          <label className="label">Name / version</label>
+          <input required value={name} onChange={(e) => setName(e.target.value)} className="input" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-slate-700">Risk level</label>
-          <select
-            value={riskLevel}
-            onChange={(e) => setRiskLevel(e.target.value as RiskLevel)}
-            className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
-          >
+          <label className="label">Risk level</label>
+          <select value={riskLevel} onChange={(e) => setRiskLevel(e.target.value as RiskLevel)} className="input">
             <option value="low">Low</option>
             <option value="medium">Medium</option>
             <option value="high">High</option>
           </select>
         </div>
         <div>
-          <label className="block text-sm font-medium text-slate-700">Target date</label>
-          <input
-            type="date"
-            value={targetDate}
-            onChange={(e) => setTargetDate(e.target.value)}
-            className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
-          />
+          <label className="label">Target date</label>
+          <input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} className="input" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-slate-700">Summary</label>
-          <textarea
-            value={summary}
-            onChange={(e) => setSummary(e.target.value)}
-            rows={3}
-            className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
-          />
+          <label className="label">Summary</label>
+          <textarea value={summary} onChange={(e) => setSummary(e.target.value)} rows={3} className="input" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-slate-700">Rollback plan</label>
-          <textarea
-            value={rollbackPlan}
-            onChange={(e) => setRollbackPlan(e.target.value)}
-            rows={3}
-            className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
-          />
+          <label className="label">Rollback plan</label>
+          <textarea value={rollbackPlan} onChange={(e) => setRollbackPlan(e.target.value)} rows={3} className="input" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-slate-700">Support period (days)</label>
+          <label className="label">Support period (days)</label>
           <input
             type="number"
             min={0}
             value={supportPeriodDays}
             onChange={(e) => setSupportPeriodDays(Number(e.target.value))}
-            className="mt-1 w-32 rounded border border-slate-300 px-3 py-2 text-sm"
+            className="input w-32"
           />
         </div>
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-        >
+        <button type="submit" disabled={submitting} className="btn-primary">
           {submitting ? 'Creating…' : 'Create release'}
         </button>
       </form>

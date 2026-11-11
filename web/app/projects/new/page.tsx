@@ -35,31 +35,22 @@ function NewProjectContent() {
 
   return (
     <div className="mx-auto max-w-lg">
-      <h1 className="mb-4 text-xl font-semibold text-slate-900">New project</h1>
-      <form onSubmit={handleSubmit} className="space-y-4 rounded border border-slate-200 bg-white p-6">
+      <h1 className="page-title mb-4">New project</h1>
+      <form onSubmit={handleSubmit} className="card space-y-4">
         {error && <ErrorState message={error} />}
         <div>
-          <label className="block text-sm font-medium text-slate-700">Name</label>
-          <input required value={name} onChange={(e) => setName(e.target.value)} className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+          <label className="label">Name</label>
+          <input required value={name} onChange={(e) => setName(e.target.value)} className="input" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-slate-700">Owning team</label>
-          <input
-            required
-            value={owningTeam}
-            onChange={(e) => setOwningTeam(e.target.value)}
-            className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
-          />
+          <label className="label">Owning team</label>
+          <input required value={owningTeam} onChange={(e) => setOwningTeam(e.target.value)} className="input" />
         </div>
         <div>
-          <label className="block text-sm font-medium text-slate-700">Repository URL (optional)</label>
-          <input value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" />
+          <label className="label">Repository URL (optional)</label>
+          <input value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} className="input" />
         </div>
-        <button
-          type="submit"
-          disabled={submitting}
-          className="rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-        >
+        <button type="submit" disabled={submitting} className="btn-primary">
           {submitting ? 'Creating…' : 'Create project'}
         </button>
       </form>
