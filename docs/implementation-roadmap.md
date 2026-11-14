@@ -176,19 +176,52 @@ All six landed as independent changes:
 
 ## Depends on the above — do next
 
-**7. Rollback and emergency release workflows (brief's Phase Seven).**
-Complexity: M. Depends on: item 2 (a rollback targets a specific prior
-candidate, which only exists once item 2 does) and item 1 (an emergency
-release still goes through *a* authorization, just under a separately
-defined, still-audited emergency policy — "emergency" must never mean
-"unauthenticated bypass").
-Rollback: link to the original deployment, target artifact, required
-reason, operator, execution/verification tracking, full history
-preserved. Emergency: explicit classification, a separately defined
-emergency policy (e.g. reduced required-approval count but never zero,
-unless a project explicitly configures that and it is loudly audited),
-justification + authorizing person recorded, mandatory retrospective
-review, and clear labeling everywhere a release or deployment is shown.
+**7. Rollback and emergency release workflows (brief's Phase Seven). — DONE.**
+Implemented: migration `0015_rollback_and_emergency.sql`
+(`project_emergency_policies`, `rollbacks`, emergency columns on
+`releases`, `rollback_id` on `deployment_authorizations` with
+`issued_by_ci_token_id` loosened to nullable + a CHECK that every
+authorization is traceable to a CI token or a rollback).
+
+- **Rollback** deliberately reuses the existing single-use deployment
+  authorization mechanism from item 1 rather than a new execution path:
+  `deployments.Service.InitiateRollback` (web, admin/coordinator) mints
+  an authorization linked via `rollback_id`, bypassing the normal gate
+  check — substituted with its own provenance check that
+  `target_deployment_id` was itself a prior *successful production*
+  deployment. CI consumes it through the existing
+  `POST .../deployments` endpoint with no new CI-facing route; `record()`
+  detects the rollback link (after consuming the authorization, before
+  the gate check it would otherwise run) and skips the gate re-check for
+  that one deployment only, then writes the outcome back onto the
+  rollback (`status: completed`/`failed`, `resulting_deployment_id`) as
+  part of the same transaction. `VerifyRollback` records a human
+  confirmation afterward; it refuses a still-`pending` rollback.
+- **Emergency** is a live-read override, not a frozen policy-snapshot
+  field: `releases.IsEmergency` is read directly from the release row by
+  `gate.EvaluateTx` every time, specifically so declaring an emergency on
+  a release already sitting in `ready_for_production` (whose policy
+  already has a snapshot per item 3) takes effect immediately — that's
+  the situation emergency declaration exists for. When true, it
+  *replaces* the required-approvals count with the project's
+  `project_emergency_policies.required_approvals_count`, which has a
+  floor of 1 enforced at both the DB (`CHECK`) and Go level — resolving
+  the open question below with the recommended floor. `DeclareEmergency`
+  requires a justification and the same permission bar as risk
+  acceptance; `releases.Service.Close` is refused with `409` until
+  `CompleteRetrospective` has been called, when the project's emergency
+  policy requires one (the default).
+- Verified against a disposable Postgres instance
+  (`internal/integrationtest`: 8 new tests covering rollback provenance
+  validation, the gate bypass being scoped to exactly the rollback
+  deployment, rollback status following the deployment result,
+  verification requiring an executed rollback, the manage-permission
+  bar, the emergency floor validation, the live override taking effect
+  on an already-snapshotted release, and the close-requires-retrospective
+  gate) and live end-to-end over HTTP against the Docker dev stack.
+- Not done this pass: a web UI for either workflow (API-only; see
+  README Limitations), and any automatic time limit or escalation for
+  an open emergency declaration.
 
 **8. Post-deployment verification states (closes Finding 12, brief's Phase Eight).**
 Complexity: S–M. Depends on: item 1 (extends the same deployment model the
@@ -253,9 +286,10 @@ WAYPOINT_TEST_DATABASE_URL="postgres://waypoint:waypoint@localhost:15432/waypoin
 - Should an "emergency release" reduced-approval policy be allowed to go
   as low as zero required approvals, or should the system enforce a floor
   (e.g. always at least one approval, even under emergency policy)?
-  Recommend a floor of one, with the emergency classification itself
-  requiring a named authorizer — "emergency" should change the bar, not
-  remove it.
+  Resolved in item 7: a floor of one, enforced at both the DB (`CHECK`)
+  and Go level, with the emergency classification itself requiring a
+  named authorizer and justification — "emergency" changes the bar, it
+  never removes it.
 
 ## What I am doing next
 

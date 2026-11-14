@@ -243,6 +243,15 @@ PATCH  /api/v1/projects/{projectID}/risk-policies
 POST   /api/v1/releases/{releaseID}/risk-acceptance
 GET    /api/v1/releases/{releaseID}/risk-acceptance
 
+GET    /api/v1/projects/{projectID}/emergency-policy
+PATCH  /api/v1/projects/{projectID}/emergency-policy
+POST   /api/v1/releases/{releaseID}/emergency
+POST   /api/v1/releases/{releaseID}/emergency-retrospective
+
+POST   /api/v1/releases/{releaseID}/rollbacks
+GET    /api/v1/releases/{releaseID}/rollbacks
+POST   /api/v1/releases/{releaseID}/rollbacks/{rollbackID}/verify
+
 GET    /api/v1/ci/releases/{releaseID}/eligibility                      (CI token)
 POST   /api/v1/ci/releases/{releaseID}/candidates                      (CI token)
 POST   /api/v1/ci/releases/{releaseID}/deployment-authorizations        (CI token)
@@ -433,6 +442,79 @@ read by nothing.
 
 Closes [`docs/architecture-audit.md`](docs/architecture-audit.md)
 Finding 4.
+
+## Rollback tracking
+
+A rollback deliberately reuses the existing single-use deployment
+authorization mechanism (see "Deployment authorization" above) instead
+of inventing a separate execution path, so no new CI-facing endpoint
+exists — CI consumes a rollback the same way it consumes any other
+authorization, through `POST /api/v1/ci/releases/{id}/deployments`.
+
+1. `POST /api/v1/releases/{id}/rollbacks` (web, admin/release
+   coordinator only) with `original_deployment_id`, `target_deployment_id`,
+   and a required `reason`. This **bypasses the normal gate check** —
+   that's the point of a rollback — but is not an unrestricted bypass:
+   `target_deployment_id` must itself have been a prior **successful
+   production** deployment (of this release or any other — rolling back
+   often means "go back to what a previous release had running").
+   Targeting a failed or non-production deployment is rejected. On
+   success this creates a `rollbacks` row (`status: pending`) and mints
+   a deployment authorization token linked to it, returned once in the
+   response body (`deployment_authorization_token`), the same way
+   `IssueAuthorization`'s token is.
+2. CI presents that token to the normal
+   `POST /api/v1/ci/releases/{id}/deployments` endpoint with
+   `artifact_digest` set to the target's digest. The token is consumed
+   exactly like any other — single-use, expiring, bound to this release
+   and digest — except `record()` recognizes it is rollback-linked and
+   skips the gate re-check for this one deployment only; every other
+   production deployment on the release, authorized or not, still goes
+   through the full gate.
+3. The deployment's outcome is written back onto the rollback
+   automatically: `status` becomes `completed` or `failed` to match the
+   deployment's `result`, and `resulting_deployment_id` records which
+   deployment executed it.
+4. `POST /api/v1/releases/{id}/rollbacks/{rollbackID}/verify` (same
+   permission bar) records a human confirmation, with a required note,
+   that the rollback actually fixed the problem. It's rejected while the
+   rollback is still `pending` (nothing has executed yet to verify).
+5. `GET /api/v1/releases/{id}/rollbacks` lists a release's rollback
+   history.
+
+Every step is audited (`rollback_initiated`, the normal
+`deployment_authorization_consumed`/`deployment_recorded` pair,
+`rollback_result_recorded`, `rollback_verified`).
+
+## Emergency releases
+
+A project can set a required-approvals floor and a retrospective
+requirement for emergency releases
+(`GET`/`PATCH /api/v1/projects/{id}/emergency-policy`); every project is
+seeded with a sensible default (1 required approval, retrospective
+required) so this works out of the box. The floor is enforced at both
+the database and Go level — `required_approvals_count` can never be set
+below 1, because an emergency changes the bar, it never removes it.
+
+- `POST /api/v1/releases/{id}/emergency` (admin/release coordinator,
+  same bar as risk acceptance) declares a release an emergency, with a
+  required `justification`. This is read **live** by the gate, not
+  frozen into the policy snapshot: declaring an emergency on a release
+  already sitting in `ready_for_production` (whose policy is already
+  snapshotted) takes effect immediately, because that's exactly the
+  situation emergency declaration exists for. While `is_emergency` is
+  true, the project's emergency-policy required-approvals count
+  **replaces** the normal required-approvals count outright (it does
+  not add to it), down to the project's configured floor.
+  `GET .../eligibility`'s response gains `is_emergency` and
+  `emergency_required_approvals_count` for visibility.
+- `POST /api/v1/releases/{id}/emergency-retrospective` (ordinary edit
+  permission — this is a documentation step, not a privileged override)
+  records retrospective notes, required before this can be called.
+- If the project's emergency policy requires a retrospective (the
+  default), `POST /api/v1/releases/{id}/close` is refused with `409`
+  until one has been completed — an emergency release cannot be closed
+  with its "what happened and why" unrecorded.
 
 ## Security hardening
 
@@ -688,3 +770,20 @@ silently assumed:
 - **Admin-set and self-service password changes have no complexity
   policy beyond an 8-character minimum**, and there is no forced
   rotation or reuse prevention.
+- **A rollback's provenance check only proves the target digest was
+  once deployed successfully to production — not that it still is, or
+  should be, considered safe.** If a previously-successful deployment
+  is later discovered to have been bad (e.g. it shipped a vulnerability
+  that was only caught afterward), nothing stops an admin from
+  initiating a rollback to it; the check is "was this proven in
+  production," not "is this still trusted today."
+- **Emergency declaration has no automatic time limit or escalation.**
+  `is_emergency` stays true indefinitely until the release is closed
+  (which requires a retrospective if the project's policy demands one);
+  there is no auto-expiry, no notification to other admins when one is
+  declared, and no limit on how many releases a project can have
+  emergency-declared at once.
+- **No web UI for rollback or emergency actions in this pass.** Both
+  are API-only (`internal/deployments`'s rollback endpoints,
+  `internal/releases`'s emergency endpoints); the frontend does not yet
+  surface a "roll back" or "declare emergency" button.
