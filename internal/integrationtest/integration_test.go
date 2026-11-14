@@ -159,6 +159,37 @@ func (h *harness) advanceToReadyForProduction(t *testing.T, ctx context.Context,
 	}
 }
 
+// satisfyGateAndDeployProduction advances rel through evidence and
+// approval so the gate's normal requirements are met, then issues a CI
+// authorization and records a successful production deployment of the
+// given digest. It returns the CI identity used (so callers can reuse
+// it to record further deployments on the same release) and the
+// resulting deployment.
+func (h *harness) satisfyGateAndDeployProduction(t *testing.T, ctx context.Context, admin, dev, approver authn.Identity, proj projects.Project, rel releases.Release, digest string) (authn.Identity, deployments.Deployment) {
+	t.Helper()
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence %s: %v", typ, err)
+		}
+	}
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	ci := h.issueCIIdentity(t, ctx, admin, proj.ID)
+	_, token, err := h.deploymentsSvc.IssueAuthorization(ctx, ci, rel.ID, digest)
+	if err != nil {
+		t.Fatalf("issue authorization: %v", err)
+	}
+	d, err := h.deploymentsSvc.RecordFromCI(ctx, ci, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvProduction, ArtifactDigest: digest, WorkflowRunURL: "https://ci.example/run/1",
+		Result: deployments.ResultSuccess, DeploymentAuthorization: token,
+	})
+	if err != nil {
+		t.Fatalf("record production deployment: %v", err)
+	}
+	return ci, d
+}
+
 func TestReleaseStageMachineRejectsInvalidTransitions(t *testing.T) {
 	ctx, pool := setup(t)
 	h := newHarness(pool)
@@ -1311,5 +1342,340 @@ func TestApproverNotSubmitterSeparationOfDuties(t *testing.T) {
 	}
 	if _, err := h.approvalsSvc.Decide(ctx, otherApprover, rel.ID, approvals.DecisionApproved, "did not submit evidence"); err != nil {
 		t.Errorf("expected an approver who did not submit evidence to be allowed to approve: %v", err)
+	}
+}
+
+func TestRollbackRequiresProvenSuccessfulProductionTarget(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	_, original := h.satisfyGateAndDeployProduction(t, ctx, admin, dev, approver, proj, rel, "sha256:original")
+
+	// A failed production deployment is not a valid rollback target: it
+	// was never proven safe.
+	failed, err := h.deploymentsSvc.RecordFromWeb(ctx, admin, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:bad", WorkflowRunURL: "https://ci.example/run/2",
+		Result: deployments.ResultFailure,
+	})
+	if err != nil {
+		t.Fatalf("record failed deployment: %v", err)
+	}
+	if _, err := h.deploymentsSvc.InitiateRollback(ctx, admin, rel.ID, deployments.InitiateRollbackInput{
+		OriginalDeploymentID: original.ID, TargetDeploymentID: failed.ID, Reason: "testing provenance",
+	}); err == nil {
+		t.Error("expected rollback to a failed deployment to be rejected")
+	}
+
+	// A non-production deployment is also not a valid rollback target.
+	devDeployment, err := h.deploymentsSvc.RecordFromWeb(ctx, admin, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvDevelopment, ArtifactDigest: "sha256:dev", WorkflowRunURL: "https://ci.example/run/3",
+		Result: deployments.ResultSuccess,
+	})
+	if err != nil {
+		t.Fatalf("record dev deployment: %v", err)
+	}
+	if _, err := h.deploymentsSvc.InitiateRollback(ctx, admin, rel.ID, deployments.InitiateRollbackInput{
+		OriginalDeploymentID: original.ID, TargetDeploymentID: devDeployment.ID, Reason: "testing provenance",
+	}); err == nil {
+		t.Error("expected rollback to a non-production deployment to be rejected")
+	}
+
+	// A prior successful production deployment is a valid target.
+	if _, err := h.deploymentsSvc.InitiateRollback(ctx, admin, rel.ID, deployments.InitiateRollbackInput{
+		OriginalDeploymentID: original.ID, TargetDeploymentID: original.ID, Reason: "rolling back to itself is allowed by provenance",
+	}); err != nil {
+		t.Errorf("expected rollback targeting a proven successful production deployment to be accepted: %v", err)
+	}
+}
+
+func TestRollbackAuthorizationBypassesGateOnlyForThatDeployment(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+
+	relA := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, relA.ID)
+	_, goodDeployment := h.satisfyGateAndDeployProduction(t, ctx, admin, dev, approver, proj, relA, "sha256:good")
+
+	relB := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, relB.ID)
+	ciB, brokenDeployment := h.satisfyGateAndDeployProduction(t, ctx, admin, dev, approver, proj, relB, "sha256:broken")
+
+	// Something is found wrong with relB's deployment after the fact: a
+	// reviewer rejects it, which re-blocks the gate.
+	if _, err := h.approvalsSvc.Decide(ctx, approver, relB.ID, approvals.DecisionRejected, "found a regression in production"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	result, err := h.gateSvc.Evaluate(ctx, relB.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if result.Eligible {
+		t.Fatal("expected relB to be ineligible after the rejection")
+	}
+
+	// A normal authorization still cannot be minted while ineligible.
+	if _, _, err := h.deploymentsSvc.IssueAuthorization(ctx, ciB, relB.ID, "sha256:another"); err == nil {
+		t.Error("expected normal authorization issuance to still be blocked by the gate")
+	}
+
+	// But an admin can initiate a rollback to the proven-safe artifact
+	// from relA, bypassing the gate for that one authorized deployment.
+	out, err := h.deploymentsSvc.InitiateRollback(ctx, admin, relB.ID, deployments.InitiateRollbackInput{
+		OriginalDeploymentID: brokenDeployment.ID, TargetDeploymentID: goodDeployment.ID, Reason: "relB's deployment caused a regression",
+	})
+	if err != nil {
+		t.Fatalf("initiate rollback: %v", err)
+	}
+	if out.Token == "" {
+		t.Fatal("expected a deployment authorization token")
+	}
+
+	d, err := h.deploymentsSvc.RecordFromCI(ctx, ciB, relB.ID, deployments.RecordInput{
+		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:good", WorkflowRunURL: "https://ci.example/rollback",
+		Result: deployments.ResultSuccess, DeploymentAuthorization: out.Token,
+	})
+	if err != nil {
+		t.Fatalf("expected rollback-authorized deployment to bypass the gate: %v", err)
+	}
+	if d.AuthorizationID == nil {
+		t.Error("expected the rollback deployment to record which authorization it consumed")
+	}
+
+	rollbacks, err := h.deploymentsSvc.ListRollbacksByRelease(ctx, admin, relB.ID)
+	if err != nil {
+		t.Fatalf("list rollbacks: %v", err)
+	}
+	if len(rollbacks) != 1 || rollbacks[0].Status != deployments.RollbackCompleted {
+		t.Fatalf("expected one completed rollback, got: %+v", rollbacks)
+	}
+	if rollbacks[0].ResultingDeploymentID == nil || *rollbacks[0].ResultingDeploymentID != d.ID {
+		t.Error("expected rollback's resulting_deployment_id to point at the new deployment")
+	}
+
+	// The rollback-linked token was single-use like any other; a normal
+	// (non-rollback) authorization is still blocked by the still-open
+	// rejection.
+	if _, _, err := h.deploymentsSvc.IssueAuthorization(ctx, ciB, relB.ID, "sha256:another"); err == nil {
+		t.Error("expected normal authorization issuance to remain blocked after the rollback")
+	}
+}
+
+func TestRollbackResultMarksStatusFailed(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	ci, original := h.satisfyGateAndDeployProduction(t, ctx, admin, dev, approver, proj, rel, "sha256:v1")
+
+	out, err := h.deploymentsSvc.InitiateRollback(ctx, admin, rel.ID, deployments.InitiateRollbackInput{
+		OriginalDeploymentID: original.ID, TargetDeploymentID: original.ID, Reason: "drill",
+	})
+	if err != nil {
+		t.Fatalf("initiate rollback: %v", err)
+	}
+
+	d, err := h.deploymentsSvc.RecordFromCI(ctx, ci, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:v1", WorkflowRunURL: "https://ci.example/rollback-fail",
+		Result: deployments.ResultFailure, DeploymentAuthorization: out.Token,
+	})
+	if err != nil {
+		t.Fatalf("expected the rollback deployment attempt itself to be recorded even though it failed: %v", err)
+	}
+
+	rollbacks, err := h.deploymentsSvc.ListRollbacksByRelease(ctx, admin, rel.ID)
+	if err != nil {
+		t.Fatalf("list rollbacks: %v", err)
+	}
+	if len(rollbacks) != 1 || rollbacks[0].Status != deployments.RollbackFailed {
+		t.Fatalf("expected one failed rollback, got: %+v", rollbacks)
+	}
+	if rollbacks[0].ResultingDeploymentID == nil || *rollbacks[0].ResultingDeploymentID != d.ID {
+		t.Error("expected resulting_deployment_id to be set even for a failed rollback attempt")
+	}
+}
+
+func TestVerifyRollbackRequiresExecutedRollback(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	ci, original := h.satisfyGateAndDeployProduction(t, ctx, admin, dev, approver, proj, rel, "sha256:v1")
+
+	out, err := h.deploymentsSvc.InitiateRollback(ctx, admin, rel.ID, deployments.InitiateRollbackInput{
+		OriginalDeploymentID: original.ID, TargetDeploymentID: original.ID, Reason: "drill",
+	})
+	if err != nil {
+		t.Fatalf("initiate rollback: %v", err)
+	}
+
+	if _, err := h.deploymentsSvc.VerifyRollback(ctx, admin, rel.ID, out.Rollback.ID, "looks fine"); err == nil {
+		t.Error("expected verifying a not-yet-executed rollback to be rejected")
+	}
+
+	if _, err := h.deploymentsSvc.RecordFromCI(ctx, ci, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:v1", WorkflowRunURL: "https://ci.example/rollback",
+		Result: deployments.ResultSuccess, DeploymentAuthorization: out.Token,
+	}); err != nil {
+		t.Fatalf("record rollback deployment: %v", err)
+	}
+
+	if _, err := h.deploymentsSvc.VerifyRollback(ctx, admin, rel.ID, out.Rollback.ID, ""); err == nil {
+		t.Error("expected an empty verification note to be rejected")
+	}
+
+	verified, err := h.deploymentsSvc.VerifyRollback(ctx, admin, rel.ID, out.Rollback.ID, "confirmed the regression is gone")
+	if err != nil {
+		t.Fatalf("verify rollback: %v", err)
+	}
+	if verified.VerifiedBy == nil || *verified.VerifiedBy != admin.User.ID {
+		t.Error("expected verified_by to be set to the verifying user")
+	}
+	if verified.VerifiedAt == nil {
+		t.Error("expected verified_at to be set")
+	}
+}
+
+func TestInitiateRollbackRequiresManagePermission(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	_, original := h.satisfyGateAndDeployProduction(t, ctx, admin, dev, approver, proj, rel, "sha256:v1")
+
+	if _, err := h.deploymentsSvc.InitiateRollback(ctx, dev, rel.ID, deployments.InitiateRollbackInput{
+		OriginalDeploymentID: original.ID, TargetDeploymentID: original.ID, Reason: "drill",
+	}); err == nil {
+		t.Error("expected a developer (not an admin or release coordinator) to be forbidden from initiating a rollback")
+	}
+}
+
+func TestEmergencyPolicyFloorEnforced(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	proj := h.createProject(t, ctx, admin)
+
+	if _, err := h.projectsSvc.UpdateEmergencyPolicy(ctx, admin, proj.ID, projects.UpdateEmergencyPolicyInput{
+		RequiredApprovalsCount: 0, RequireRetrospective: true,
+	}); err == nil {
+		t.Error("expected required_approvals_count of 0 to be rejected: an emergency changes the bar, it never removes it")
+	}
+
+	ep, err := h.projectsSvc.UpdateEmergencyPolicy(ctx, admin, proj.ID, projects.UpdateEmergencyPolicyInput{
+		RequiredApprovalsCount: 2, RequireRetrospective: false,
+	})
+	if err != nil {
+		t.Fatalf("update emergency policy: %v", err)
+	}
+	if ep.RequiredApprovalsCount != 2 || ep.RequireRetrospective {
+		t.Errorf("unexpected emergency policy after update: %+v", ep)
+	}
+}
+
+func TestEmergencyDeclarationOverridesRequiredApprovalsLive(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+
+	if _, err := h.projectsSvc.UpdatePolicy(ctx, admin, proj.ID, projects.UpdatePolicyInput{
+		RequiredEvidenceTypes: []string{}, RequiredApprovalsCount: 2,
+	}); err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+
+	result, err := h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if result.Eligible {
+		t.Fatal("expected a release needing 2 approvals with 0 to be ineligible")
+	}
+	if result.RequiredApprovalsCount != 2 {
+		t.Errorf("expected required approvals count 2 before any emergency declaration, got %d", result.RequiredApprovalsCount)
+	}
+
+	// Declaring an emergency on an already-ready_for_production release
+	// (whose policy is already frozen into a snapshot) takes effect
+	// immediately, because IsEmergency is read live, never from the
+	// snapshot.
+	if _, err := h.releasesSvc.DeclareEmergency(ctx, admin, rel.ID, "prod checkout is down, customers cannot pay"); err != nil {
+		t.Fatalf("declare emergency: %v", err)
+	}
+
+	result, err = h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !result.IsEmergency {
+		t.Error("expected the gate result to reflect emergency status")
+	}
+	if result.RequiredApprovalsCount != 1 {
+		t.Errorf("expected emergency to drop required approvals to the floor of 1, got %d", result.RequiredApprovalsCount)
+	}
+	if result.Eligible {
+		t.Fatal("expected still-ineligible with 0 approvals even at the emergency floor of 1")
+	}
+
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "emergency approval"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	result, err = h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !result.Eligible {
+		t.Fatalf("expected eligible after 1 approval under the emergency floor, blockers: %v", result.Blockers)
+	}
+}
+
+func TestEmergencyReleaseCannotCloseWithoutRetrospective(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	proj := h.createProject(t, ctx, admin, dev)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+
+	if _, err := h.releasesSvc.DeclareEmergency(ctx, admin, rel.ID, "sev1 outage"); err != nil {
+		t.Fatalf("declare emergency: %v", err)
+	}
+
+	if _, err := h.releasesSvc.Close(ctx, admin, rel.ID, "done"); err == nil {
+		t.Error("expected close to be blocked until the emergency retrospective is completed")
+	}
+
+	if _, err := h.releasesSvc.CompleteRetrospective(ctx, admin, rel.ID, "root cause: bad config push, fixed by revert"); err != nil {
+		t.Fatalf("complete retrospective: %v", err)
+	}
+
+	if _, err := h.releasesSvc.Close(ctx, admin, rel.ID, "done"); err != nil {
+		t.Fatalf("expected close to succeed after retrospective completed: %v", err)
 	}
 }
