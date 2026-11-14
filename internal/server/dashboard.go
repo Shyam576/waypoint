@@ -15,6 +15,7 @@ import (
 	"github.com/Shyam576/waypoint/internal/mcpnotes"
 	"github.com/Shyam576/waypoint/internal/projects"
 	"github.com/Shyam576/waypoint/internal/releases"
+	"github.com/Shyam576/waypoint/internal/support"
 	"github.com/Shyam576/waypoint/internal/users"
 )
 
@@ -29,11 +30,12 @@ type DashboardService struct {
 	approvals   *approvals.Store
 	deployments *deployments.Store
 	submissions *mcpnotes.Store
+	support     *support.Store
 	gate        *gate.Service
 }
 
-func NewDashboardService(pool *pgxpool.Pool, projectsStore *projects.Store, releasesStore *releases.Store, approvalsStore *approvals.Store, deploymentsStore *deployments.Store, submissionsStore *mcpnotes.Store, gateSvc *gate.Service) *DashboardService {
-	return &DashboardService{pool: pool, projects: projectsStore, releases: releasesStore, approvals: approvalsStore, deployments: deploymentsStore, submissions: submissionsStore, gate: gateSvc}
+func NewDashboardService(pool *pgxpool.Pool, projectsStore *projects.Store, releasesStore *releases.Store, approvalsStore *approvals.Store, deploymentsStore *deployments.Store, submissionsStore *mcpnotes.Store, supportStore *support.Store, gateSvc *gate.Service) *DashboardService {
+	return &DashboardService{pool: pool, projects: projectsStore, releases: releasesStore, approvals: approvalsStore, deployments: deploymentsStore, submissions: submissionsStore, support: supportStore, gate: gateSvc}
 }
 
 type DashboardRelease struct {
@@ -42,11 +44,23 @@ type DashboardRelease struct {
 	Reason      string `json:"reason,omitempty"`
 }
 
+// DashboardSupportItem adds the release/project names a bare
+// support.Item doesn't carry, for the "open incidents" panel.
+type DashboardSupportItem struct {
+	support.Item
+	ReleaseName string `json:"release_name"`
+	ProjectName string `json:"project_name"`
+}
+
 type Dashboard struct {
-	NeedsMyAction      []DashboardRelease       `json:"needs_my_action"`
-	Blocked            []DashboardRelease       `json:"blocked"`
-	UpcomingProduction []DashboardRelease       `json:"upcoming_production"`
-	RecentDeployments  []deployments.Deployment `json:"recent_deployments"`
+	NeedsMyAction                   []DashboardRelease       `json:"needs_my_action"`
+	Blocked                         []DashboardRelease       `json:"blocked"`
+	UpcomingProduction              []DashboardRelease       `json:"upcoming_production"`
+	EmergencyReleases               []DashboardRelease       `json:"emergency_releases"`
+	OpenIncidents                   []DashboardSupportItem   `json:"open_incidents"`
+	RecentDeployments               []deployments.Deployment `json:"recent_deployments"`
+	FailedDeployments               []deployments.Deployment `json:"failed_deployments"`
+	AwaitingVerificationDeployments []deployments.Deployment `json:"awaiting_verification_deployments"`
 }
 
 func (s *DashboardService) visibleProjects(ctx context.Context, identity authn.Identity) ([]projects.Project, error) {
@@ -80,12 +94,31 @@ func (s *DashboardService) Build(ctx context.Context, identity authn.Identity) (
 	canApprove := identity.User.Role == users.RoleAdmin || identity.User.Role == users.RoleApprover
 	canReview := identity.User.Role == users.RoleAdmin || identity.User.Role == users.RoleDeveloper || identity.User.Role == users.RoleReleaseCoordinator
 
-	var needsAction, blocked, upcoming []DashboardRelease
+	var needsAction, blocked, upcoming, emergency []DashboardRelease
+	var openIncidents []DashboardSupportItem
 	now := time.Now()
 
 	for _, r := range allReleases {
 		if r.Stage == releases.StageClosed {
 			continue
+		}
+
+		if r.IsEmergency {
+			reason := "emergency release"
+			if r.EmergencyRetrospectiveCompletedAt == nil {
+				reason = "emergency release awaiting retrospective"
+			}
+			emergency = append(emergency, DashboardRelease{Release: r, ProjectName: projectName[r.ProjectID], Reason: reason})
+		}
+
+		items, err := s.support.ListByRelease(ctx, s.pool, r.ID)
+		if err != nil {
+			return Dashboard{}, err
+		}
+		for _, item := range items {
+			if item.Status == support.StatusOpen || item.Status == support.StatusInvestigating {
+				openIncidents = append(openIncidents, DashboardSupportItem{Item: item, ReleaseName: r.Name, ProjectName: projectName[r.ProjectID]})
+			}
 		}
 
 		if r.Stage == releases.StageReadyForProduction {
@@ -137,11 +170,25 @@ func (s *DashboardService) Build(ctx context.Context, identity authn.Identity) (
 		recent = []deployments.Deployment{}
 	}
 
+	failed, err := s.deployments.ListFailed(ctx, s.pool, projectIDs, 20)
+	if err != nil {
+		return Dashboard{}, err
+	}
+
+	awaitingVerification, err := s.deployments.ListAwaitingVerification(ctx, s.pool, projectIDs, 20)
+	if err != nil {
+		return Dashboard{}, err
+	}
+
 	return Dashboard{
-		NeedsMyAction:      nonNil(needsAction),
-		Blocked:            nonNil(blocked),
-		UpcomingProduction: nonNil(upcoming),
-		RecentDeployments:  recent,
+		NeedsMyAction:                   nonNil(needsAction),
+		Blocked:                         nonNil(blocked),
+		UpcomingProduction:              nonNil(upcoming),
+		EmergencyReleases:               nonNil(emergency),
+		OpenIncidents:                   nonNilSupportItems(openIncidents),
+		RecentDeployments:               recent,
+		FailedDeployments:               failed,
+		AwaitingVerificationDeployments: awaitingVerification,
 	}, nil
 }
 
@@ -150,6 +197,13 @@ func statusPtr(s mcpnotes.SubmissionStatus) *mcpnotes.SubmissionStatus { return 
 func nonNil(in []DashboardRelease) []DashboardRelease {
 	if in == nil {
 		return []DashboardRelease{}
+	}
+	return in
+}
+
+func nonNilSupportItems(in []DashboardSupportItem) []DashboardSupportItem {
+	if in == nil {
+		return []DashboardSupportItem{}
 	}
 	return in
 }

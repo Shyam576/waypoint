@@ -126,7 +126,7 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Server {
 	mcpNotesSvc := mcpnotes.NewService(pool, mcpNotesStore, auditStore, releasesSvc, supportSvc)
 	mcpNotesHandlers := mcpnotes.NewHandlers(mcpNotesSvc)
 
-	dashboard := NewDashboardService(pool, projectsStore, releasesStore, approvalsStore, deploymentsStore, mcpNotesStore, gateSvc)
+	dashboard := NewDashboardService(pool, projectsStore, releasesStore, approvalsStore, deploymentsStore, mcpNotesStore, supportStore, gateSvc)
 
 	return &Server{
 		Cfg: cfg, Pool: pool,
