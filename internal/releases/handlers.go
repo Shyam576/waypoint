@@ -320,3 +320,57 @@ func (h *Handlers) GetRiskAcceptance(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, a)
 }
+
+type declareEmergencyRequest struct {
+	Justification string `json:"justification"`
+}
+
+func (h *Handlers) DeclareEmergency(w http.ResponseWriter, r *http.Request) {
+	identity, ok := mustIdentity(w, r)
+	if !ok {
+		return
+	}
+	id, err := parseUUID(r, "releaseID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req declareEmergencyRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	rel, err := h.Svc.DeclareEmergency(r.Context(), identity, id, req.Justification)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, rel)
+}
+
+type completeRetrospectiveRequest struct {
+	Notes string `json:"notes"`
+}
+
+func (h *Handlers) CompleteRetrospective(w http.ResponseWriter, r *http.Request) {
+	identity, ok := mustIdentity(w, r)
+	if !ok {
+		return
+	}
+	id, err := parseUUID(r, "releaseID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req completeRetrospectiveRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	rel, err := h.Svc.CompleteRetrospective(r.Context(), identity, id, req.Notes)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, rel)
+}

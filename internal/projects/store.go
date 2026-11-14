@@ -183,6 +183,47 @@ func (s *Store) ListRiskPolicies(ctx context.Context, q dbx.Querier, projectID u
 	return out, rows.Err()
 }
 
+const emergencyPolicyColumns = `project_id, required_approvals_count, require_retrospective, updated_by, updated_at`
+
+func scanEmergencyPolicy(row pgx.Row) (EmergencyPolicy, error) {
+	var p EmergencyPolicy
+	err := row.Scan(&p.ProjectID, &p.RequiredApprovalsCount, &p.RequireRetrospective, &p.UpdatedBy, &p.UpdatedAt)
+	return p, err
+}
+
+func (s *Store) UpsertEmergencyPolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID, requiredApprovalsCount int, requireRetrospective bool, updatedBy *uuid.UUID) (EmergencyPolicy, error) {
+	row := q.QueryRow(ctx, `
+		INSERT INTO project_emergency_policies (project_id, required_approvals_count, require_retrospective, updated_by)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (project_id) DO UPDATE SET
+			required_approvals_count = EXCLUDED.required_approvals_count,
+			require_retrospective = EXCLUDED.require_retrospective,
+			updated_by = EXCLUDED.updated_by,
+			updated_at = now()
+		RETURNING `+emergencyPolicyColumns,
+		projectID, requiredApprovalsCount, requireRetrospective, updatedBy,
+	)
+	return scanEmergencyPolicy(row)
+}
+
+// GetEmergencyPolicy returns (nil, nil) if the project has never
+// configured one, in which case the floor-of-1 default (see
+// SeedDefaultEmergencyPolicy, applied on project creation) simply
+// hasn't been written yet for a project created before this feature
+// existed; callers should treat that the same as "require 1 approval,
+// require a retrospective" rather than "no requirement at all."
+func (s *Store) GetEmergencyPolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID) (*EmergencyPolicy, error) {
+	row := q.QueryRow(ctx, `SELECT `+emergencyPolicyColumns+` FROM project_emergency_policies WHERE project_id = $1`, projectID)
+	p, err := scanEmergencyPolicy(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &p, nil
+}
+
 func (s *Store) AddMember(ctx context.Context, q dbx.Querier, projectID, userID uuid.UUID) error {
 	_, err := q.Exec(ctx, `
 		INSERT INTO project_members (project_id, user_id) VALUES ($1, $2)

@@ -115,6 +115,12 @@ func (s *Service) Create(ctx context.Context, identity authn.Identity, in Create
 			if _, err := s.store.UpsertRiskPolicy(ctx, tx, p.ID, "critical", 1, []string{"security_review"}, true, &identity.User.ID); err != nil {
 				return Project{}, err
 			}
+			// Default emergency policy: the floor of 1 required approval,
+			// and a retrospective is required before an emergency release
+			// can be closed.
+			if _, err := s.store.UpsertEmergencyPolicy(ctx, tx, p.ID, 1, true, &identity.User.ID); err != nil {
+				return Project{}, err
+			}
 			if err := s.audit.Record(ctx, tx, "project", p.ID, "project_created", identity.AuditActor(), nil, p, ""); err != nil {
 				return Project{}, err
 			}
@@ -438,6 +444,82 @@ func (s *Service) UpdateRiskPolicy(ctx context.Context, identity authn.Identity,
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return RiskPolicy{}, err
+	}
+	return after, nil
+}
+
+// EmergencyPolicyFor returns this project's emergency-release policy as
+// plain values (required-approvals floor and whether a retrospective is
+// required), or the floor-of-1-plus-retrospective default if the
+// project was created before this feature existed and has no row yet.
+// No authorization check of its own, for the same reason and callers as
+// CurrentPolicy/RiskPolicyFor (internal/releases, internal/gate).
+func (s *Service) EmergencyPolicyFor(ctx context.Context, projectID uuid.UUID) (int, bool, error) {
+	p, err := s.store.GetEmergencyPolicy(ctx, s.pool, projectID)
+	if err != nil {
+		return 0, false, err
+	}
+	if p == nil {
+		return 1, true, nil
+	}
+	return p.RequiredApprovalsCount, p.RequireRetrospective, nil
+}
+
+func (s *Service) GetEmergencyPolicy(ctx context.Context, identity authn.Identity, projectID uuid.UUID) (EmergencyPolicy, error) {
+	ok, err := s.canView(ctx, identity, projectID)
+	if err != nil {
+		return EmergencyPolicy{}, err
+	}
+	if !ok {
+		return EmergencyPolicy{}, httpx.Forbidden("you do not have access to this project")
+	}
+	p, err := s.store.GetEmergencyPolicy(ctx, s.pool, projectID)
+	if err != nil {
+		return EmergencyPolicy{}, err
+	}
+	if p == nil {
+		return EmergencyPolicy{ProjectID: projectID, RequiredApprovalsCount: 1, RequireRetrospective: true}, nil
+	}
+	return *p, nil
+}
+
+type UpdateEmergencyPolicyInput struct {
+	RequiredApprovalsCount int
+	RequireRetrospective   bool
+}
+
+func (s *Service) UpdateEmergencyPolicy(ctx context.Context, identity authn.Identity, projectID uuid.UUID, in UpdateEmergencyPolicyInput) (EmergencyPolicy, error) {
+	ok, err := s.canManage(ctx, identity, projectID)
+	if err != nil {
+		return EmergencyPolicy{}, err
+	}
+	if !ok {
+		return EmergencyPolicy{}, httpx.Forbidden("only admins and release coordinators on this project can edit its emergency policy")
+	}
+	if in.RequiredApprovalsCount < 1 {
+		return EmergencyPolicy{}, httpx.BadRequest("required_approvals_count must be at least 1: an emergency changes the bar, it never removes it")
+	}
+
+	before, err := s.store.GetEmergencyPolicy(ctx, s.pool, projectID)
+	if err != nil {
+		return EmergencyPolicy{}, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return EmergencyPolicy{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	after, err := s.store.UpsertEmergencyPolicy(ctx, tx, projectID, in.RequiredApprovalsCount, in.RequireRetrospective, &identity.User.ID)
+	if err != nil {
+		return EmergencyPolicy{}, err
+	}
+	if err := s.audit.Record(ctx, tx, "project", projectID, "emergency_policy_updated", identity.AuditActor(), before, after, ""); err != nil {
+		return EmergencyPolicy{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return EmergencyPolicy{}, err
 	}
 	return after, nil
 }

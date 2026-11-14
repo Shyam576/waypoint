@@ -85,6 +85,21 @@ type RiskPolicy struct {
 	UpdatedAt                   time.Time  `json:"updated_at"`
 }
 
+// EmergencyPolicy is the separately defined, reduced-requirements policy
+// an emergency-classified release is held to instead of the normal
+// base+risk-tier policy. required_approvals_count has a floor of 1,
+// enforced by this struct's callers and by a DB CHECK constraint:
+// emergency changes the bar, it never removes it. See
+// docs/architecture-audit.md Phase Seven / Finding-adjacent discussion
+// in docs/implementation-roadmap.md's Open Questions.
+type EmergencyPolicy struct {
+	ProjectID              uuid.UUID  `json:"project_id"`
+	RequiredApprovalsCount int        `json:"required_approvals_count"`
+	RequireRetrospective   bool       `json:"require_retrospective"`
+	UpdatedBy              *uuid.UUID `json:"updated_by,omitempty"`
+	UpdatedAt              time.Time  `json:"updated_at"`
+}
+
 type Member struct {
 	ProjectID uuid.UUID `json:"project_id"`
 	UserID    uuid.UUID `json:"user_id"`

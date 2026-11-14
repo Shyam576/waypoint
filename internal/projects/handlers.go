@@ -270,3 +270,51 @@ func (h *Handlers) UpdateRiskPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, p)
 }
+
+func (h *Handlers) GetEmergencyPolicy(w http.ResponseWriter, r *http.Request) {
+	identity, ok := mustIdentity(w, r)
+	if !ok {
+		return
+	}
+	id, err := parseUUIDParam(r, "projectID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	p, err := h.Svc.GetEmergencyPolicy(r.Context(), identity, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, p)
+}
+
+type updateEmergencyPolicyRequest struct {
+	RequiredApprovalsCount int  `json:"required_approvals_count"`
+	RequireRetrospective   bool `json:"require_retrospective"`
+}
+
+func (h *Handlers) UpdateEmergencyPolicy(w http.ResponseWriter, r *http.Request) {
+	identity, ok := mustIdentity(w, r)
+	if !ok {
+		return
+	}
+	id, err := parseUUIDParam(r, "projectID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req updateEmergencyPolicyRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	p, err := h.Svc.UpdateEmergencyPolicy(r.Context(), identity, id, UpdateEmergencyPolicyInput{
+		RequiredApprovalsCount: req.RequiredApprovalsCount, RequireRetrospective: req.RequireRetrospective,
+	})
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, p)
+}

@@ -33,6 +33,13 @@ type ProjectAccess interface {
 	// snapshot alongside the base policy. See
 	// docs/architecture-audit.md Finding 4.
 	RiskPolicyFor(ctx context.Context, projectID uuid.UUID, riskLevel string) (extraRequiredApprovalsCount int, extraRequiredEvidenceTypes []string, requireRiskAcceptance bool, err error)
+	// EmergencyPolicyFor returns the project's emergency-release policy
+	// (the required-approvals floor and whether a retrospective is
+	// required) as plain values. internal/gate reads this live (not via
+	// the policy snapshot) and Close reads it to enforce the
+	// retrospective requirement. See docs/architecture-audit.md Phase
+	// Seven discussion.
+	EmergencyPolicyFor(ctx context.Context, projectID uuid.UUID) (requiredApprovalsCount int, requireRetrospective bool, err error)
 }
 
 type Service struct {
@@ -336,6 +343,20 @@ func (s *Service) Close(ctx context.Context, identity authn.Identity, id uuid.UU
 		return Release{}, httpx.Forbidden("you do not have permission to close this release")
 	}
 
+	// An emergency release whose project requires a retrospective cannot
+	// be closed until one is recorded — this is what makes "require
+	// retrospective review" an enforced step rather than a field nobody
+	// fills in. See docs/architecture-audit.md Phase Seven discussion.
+	if before.IsEmergency {
+		_, requireRetro, err := s.projects.EmergencyPolicyFor(ctx, before.ProjectID)
+		if err != nil {
+			return Release{}, err
+		}
+		if requireRetro && before.EmergencyRetrospectiveCompletedAt == nil {
+			return Release{}, httpx.Conflict("this emergency release requires a completed retrospective before it can be closed")
+		}
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Release{}, err
@@ -347,6 +368,89 @@ func (s *Service) Close(ctx context.Context, identity authn.Identity, id uuid.UU
 		return Release{}, err
 	}
 	if err := s.audit.Record(ctx, tx, "release", id, "release_closed", identity.AuditActor(), before.Stage, after.Stage, reason); err != nil {
+		return Release{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Release{}, err
+	}
+	return after, nil
+}
+
+// DeclareEmergency classifies a release as an emergency, recording the
+// justification and authorizer. Held to the same bar as AcceptRisk
+// (project management permission): it's a deliberate, audited override
+// that reduces the gate's required-approvals count, not a routine
+// action. Takes effect immediately for internal/gate, even for a
+// release already sitting in ready_for_production — see
+// docs/architecture-audit.md Phase Seven discussion.
+func (s *Service) DeclareEmergency(ctx context.Context, identity authn.Identity, releaseID uuid.UUID, justification string) (Release, error) {
+	if justification == "" {
+		return Release{}, httpx.BadRequest("a justification is required to declare a release an emergency")
+	}
+	before, err := s.store.GetByID(ctx, s.pool, releaseID)
+	if err != nil {
+		return Release{}, httpx.NotFound("release not found")
+	}
+	ok, err := s.projects.CanManage(ctx, identity, before.ProjectID)
+	if err != nil {
+		return Release{}, err
+	}
+	if !ok {
+		return Release{}, httpx.Forbidden("only admins and release coordinators on this project can declare a release an emergency")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Release{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	after, err := s.store.DeclareEmergency(ctx, tx, releaseID, justification, identity.User.ID)
+	if err != nil {
+		return Release{}, err
+	}
+	if err := s.audit.Record(ctx, tx, "release", releaseID, "release_declared_emergency", identity.AuditActor(), before, after, justification); err != nil {
+		return Release{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Release{}, err
+	}
+	return after, nil
+}
+
+// CompleteRetrospective documents the mandatory post-emergency review.
+// Editing permission is enough (not project management): a retrospective
+// is documentation of what happened, not a privileged override.
+func (s *Service) CompleteRetrospective(ctx context.Context, identity authn.Identity, releaseID uuid.UUID, notes string) (Release, error) {
+	if notes == "" {
+		return Release{}, httpx.BadRequest("retrospective notes are required")
+	}
+	before, err := s.store.GetByID(ctx, s.pool, releaseID)
+	if err != nil {
+		return Release{}, httpx.NotFound("release not found")
+	}
+	if !before.IsEmergency {
+		return Release{}, httpx.BadRequest("this release was never declared an emergency; there is nothing to retrospect")
+	}
+	ok, err := s.canEdit(ctx, identity, before.ProjectID)
+	if err != nil {
+		return Release{}, err
+	}
+	if !ok {
+		return Release{}, httpx.Forbidden("you do not have permission to edit this release")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Release{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	after, err := s.store.CompleteRetrospective(ctx, tx, releaseID, identity.User.ID, notes)
+	if err != nil {
+		return Release{}, err
+	}
+	if err := s.audit.Record(ctx, tx, "release", releaseID, "emergency_retrospective_completed", identity.AuditActor(), before, after, notes); err != nil {
 		return Release{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

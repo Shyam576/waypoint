@@ -114,6 +114,18 @@ type Release struct {
 	CreatedBy         uuid.UUID  `json:"created_by"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`
+
+	// Emergency classification (brief Phase Seven). IsEmergency is read
+	// live by internal/gate (not frozen into the policy snapshot), so
+	// declaring an emergency takes effect immediately even for a release
+	// already sitting in ready_for_production.
+	IsEmergency                       bool       `json:"is_emergency"`
+	EmergencyJustification            string     `json:"emergency_justification,omitempty"`
+	EmergencyAuthorizedBy             *uuid.UUID `json:"emergency_authorized_by,omitempty"`
+	EmergencyDeclaredAt               *time.Time `json:"emergency_declared_at,omitempty"`
+	EmergencyRetrospectiveCompletedBy *uuid.UUID `json:"emergency_retrospective_completed_by,omitempty"`
+	EmergencyRetrospectiveCompletedAt *time.Time `json:"emergency_retrospective_completed_at,omitempty"`
+	EmergencyRetrospectiveNotes       string     `json:"emergency_retrospective_notes,omitempty"`
 }
 
 // RiskAcceptance is an explicit, named acknowledgement that a release's

@@ -17,11 +17,14 @@ func NewStore() *Store { return &Store{} }
 
 // releaseColumns / scanReleaseRow centralize the release row shape so
 // every method below (and future ones) stays in sync automatically.
-const releaseColumns = `id, project_id, owner_id, name, target_date, risk_level, risk_categories, summary, rollback_plan, support_period_days, stage, support_ends_at, created_by, created_at, updated_at`
+const releaseColumns = `id, project_id, owner_id, name, target_date, risk_level, risk_categories, summary, rollback_plan, support_period_days, stage, support_ends_at, created_by, created_at, updated_at, is_emergency, emergency_justification, emergency_authorized_by, emergency_declared_at, emergency_retrospective_completed_by, emergency_retrospective_completed_at, emergency_retrospective_notes`
 
 func scanReleaseRow(row pgx.Row) (Release, error) {
 	var r Release
-	err := row.Scan(&r.ID, &r.ProjectID, &r.OwnerID, &r.Name, &r.TargetDate, &r.RiskLevel, &r.RiskCategories, &r.Summary, &r.RollbackPlan, &r.SupportPeriodDays, &r.Stage, &r.SupportEndsAt, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt)
+	err := row.Scan(&r.ID, &r.ProjectID, &r.OwnerID, &r.Name, &r.TargetDate, &r.RiskLevel, &r.RiskCategories, &r.Summary, &r.RollbackPlan,
+		&r.SupportPeriodDays, &r.Stage, &r.SupportEndsAt, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt,
+		&r.IsEmergency, &r.EmergencyJustification, &r.EmergencyAuthorizedBy, &r.EmergencyDeclaredAt,
+		&r.EmergencyRetrospectiveCompletedBy, &r.EmergencyRetrospectiveCompletedAt, &r.EmergencyRetrospectiveNotes)
 	return r, err
 }
 
@@ -237,4 +240,34 @@ func (s *Store) GetRiskAcceptance(ctx context.Context, q dbx.Querier, releaseID 
 		return nil, err
 	}
 	return &a, nil
+}
+
+// DeclareEmergency marks a release as an emergency, recording the
+// justification and who authorized it. Idempotent: calling it again
+// updates the justification/authorizer rather than erroring, since there
+// is no "un-declare" — see docs/architecture-audit.md Phase Seven
+// discussion.
+func (s *Store) DeclareEmergency(ctx context.Context, q dbx.Querier, id uuid.UUID, justification string, authorizedBy uuid.UUID) (Release, error) {
+	row := q.QueryRow(ctx, `
+		UPDATE releases
+		SET is_emergency = true, emergency_justification = $2, emergency_authorized_by = $3, emergency_declared_at = now(), updated_at = now()
+		WHERE id = $1
+		RETURNING `+releaseColumns,
+		id, justification, authorizedBy,
+	)
+	return scanReleaseRow(row)
+}
+
+// CompleteRetrospective records that an emergency release's mandatory
+// retrospective review happened. internal/releases.Service.Close checks
+// this when the project's emergency policy requires one.
+func (s *Store) CompleteRetrospective(ctx context.Context, q dbx.Querier, id uuid.UUID, completedBy uuid.UUID, notes string) (Release, error) {
+	row := q.QueryRow(ctx, `
+		UPDATE releases
+		SET emergency_retrospective_completed_by = $2, emergency_retrospective_completed_at = now(), emergency_retrospective_notes = $3, updated_at = now()
+		WHERE id = $1
+		RETURNING `+releaseColumns,
+		id, completedBy, notes,
+	)
+	return scanReleaseRow(row)
 }
