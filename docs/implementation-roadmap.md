@@ -76,18 +76,39 @@ and still reads the live policy, exactly as the Open Question below
 recommended. `UpdatePolicy` itself was left completely unrestricted —
 the fix is entirely on the read side.
 
-**4. Structured checklist / evidence engine (closes Finding 5).**
-Complexity: L. Depends on: item 3 (checklist version should be snapshotted
-the same way policy is).
-Replaces free-text evidence with: reusable per-project templates,
-template versioning, required/optional items, a responsible owner per
-item, a verification status, reviewer sign-off, rejection with a reason,
-controlled exceptions, and completion timestamps — all per the categories
-the brief lists (development / UAT / production-readiness /
-post-deployment). A release keeps the checklist version assigned when it
-was created even if the project's template changes later. This is the
-largest single item in the roadmap; it touches the database schema, the
-gate, the API, and most of the release-detail frontend page.
+**4. Structured checklist engine (closes Finding 5). — DONE.**
+Implemented: new `internal/checklists` package, migration
+`0012_checklists.sql`. Extends (per the brief's own Phase Four heading
+— "extend," not replace) the existing free-text evidence system rather
+than removing it: both exist side by side. Delivers every sub-item the
+brief asks for: reusable per-project templates (`checklist_templates` +
+`checklist_template_items`), template versioning (a new version
+deactivates the previous one; existing releases are unaffected),
+required/optional items (`is_required`), a responsible owner per item
+(`AssignOwner`), a verification status (`pending`/`verified`/`rejected`/
+`waived`), reviewer sign-off (`Verify`), rejection with a reason
+(`Reject`, reason required), controlled exceptions (`Waive`, held to a
+stricter permission bar than Verify/Reject since it overrides a
+requirement rather than confirming it), and completion timestamps
+(`decided_at`). A release is materialized with its own copy of the
+project's active template version at creation time
+(`MaterializeForRelease`), so it keeps that version even if the
+project's template changes later — verified by a dedicated test. Every
+new project is auto-seeded with a starter template matching the brief's
+suggested categories and items, so the feature works without extra
+setup; `policy.require_checklist_completion` (default `false`, same
+opt-in convention as items 2/3) is what actually makes the gate block on
+incomplete required items — `gate.Result.IncompleteChecklistItems` is
+always populated for visibility regardless of the flag.
+
+Known, documented limitation: `verification_method`
+(`human_attestation`/`automated_check`) is metadata only in this pass —
+nothing wires up a channel for an automated system to report a result,
+so every item is still verified/rejected/waived by a human today
+regardless of that field's value. Evidence is also still not bound to
+a checklist item or a candidate; this item closes Finding 5 for
+checklists specifically, not for the pre-existing free-text evidence
+system.
 
 **5. High-risk / payment change controls (closes Finding 4).**
 Complexity: M. Depends on: item 4 (risk-tier-specific requirements are

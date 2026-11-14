@@ -48,6 +48,7 @@ internal/     business logic, one package per domain area
   releases    release record and stage transition rules
   evidence    evidence submissions (test results, sign-off, ...)
   candidates  release candidates: the immutable build identity (commit, image digest, ...) a release currently points at
+  checklists  structured go-live checklists: versioned templates, per-release verification/sign-off/waiver
   approvals   approve/reject decisions
   gate        the production eligibility check
   deployments deployment records, CI-token-protected endpoints
@@ -223,6 +224,15 @@ POST   /api/v1/mcp/releases/{releaseID}/change-notes       (MCP token)
 GET    /api/v1/releases/{releaseID}/candidates
 POST   /api/v1/releases/{releaseID}/candidates
 
+POST   /api/v1/projects/{projectID}/checklist-templates
+GET    /api/v1/projects/{projectID}/checklist-templates/active
+GET    /api/v1/projects/{projectID}/checklist-templates
+GET    /api/v1/releases/{releaseID}/checklist-items
+POST   /api/v1/checklist-items/{itemID}/owner
+POST   /api/v1/checklist-items/{itemID}/verify
+POST   /api/v1/checklist-items/{itemID}/reject
+POST   /api/v1/checklist-items/{itemID}/waive
+
 GET    /api/v1/ci/releases/{releaseID}/eligibility                      (CI token)
 POST   /api/v1/ci/releases/{releaseID}/candidates                      (CI token)
 POST   /api/v1/ci/releases/{releaseID}/deployment-authorizations        (CI token)
@@ -336,6 +346,42 @@ This closes
 any project that registers candidates; it is opt-in (beyond the
 always-on authorization/digest check above) rather than mandatory, to
 avoid silently changing behavior for projects that don't use it.
+
+## Structured go-live checklists
+
+`internal/checklists` extends (not replaces — both exist side by side)
+the free-text evidence system with a versioned, per-project checklist:
+
+- A project has one **active template version** at a time
+  (`checklist_templates` + `checklist_template_items`), grouped into 4
+  fixed categories: `development`, `uat`, `production_readiness`,
+  `post_deployment`. Every new project is auto-seeded with a starter
+  template (the categories/items the brief suggests) so the feature
+  works out of the box; `POST /api/v1/projects/{id}/checklist-templates`
+  creates a new version (deactivating the previous one — existing
+  releases are unaffected).
+- When a release is **created**, it is assigned the project's
+  currently-active template version by copying each item into its own
+  row (`release_checklist_items`). A later template version change never
+  retroactively alters a release already created — verified by a
+  dedicated test.
+- Each item has `is_required`, a `verification_method`
+  (`human_attestation` or `automated_check` — descriptive only in this
+  release; see Limitations), an assignable `owner_id`
+  (`POST /api/v1/checklist-items/{id}/owner`), and a status:
+  `pending` → `verified` (`POST .../verify`, reviewer sign-off + an
+  optional evidence reference), `rejected` (`POST .../reject`, reason
+  required), or `waived` (`POST .../waive`, reason required — a
+  controlled exception, held to a stricter permission bar: project
+  management, not just edit permission). Every transition is audited.
+- A project can set `require_checklist_completion: true` on its policy
+  (default `false`) to make the gate actually block on incomplete
+  required items; `GET .../eligibility`'s `incomplete_checklist_items`
+  lists outstanding item titles regardless of the flag, for visibility.
+
+Closes [`docs/architecture-audit.md`](docs/architecture-audit.md)
+Finding 5 for checklists specifically (evidence itself is still
+free-text and unbound to a candidate — see Limitations).
 
 ## GitHub Actions integration
 
@@ -489,12 +535,23 @@ silently assumed:
   This was a deliberate choice to avoid silently changing gate behavior
   for every existing project — see `docs/architecture-audit.md` Finding 2
   and `docs/implementation-roadmap.md` item 2 for the reasoning.
-- **Evidence still isn't bound to a candidate or verified beyond being
-  present.** Anyone with project visibility can submit any evidence
-  type as free text (Finding 5) — registering a release candidate
-  constrains *approvals* and *deployment authorization*, not evidence.
-  A structured, ownership/verification-aware checklist engine (roadmap
-  item 4) is the planned fix.
+- **The original free-text evidence system is unchanged and still
+  unverified.** Anyone with project visibility can still submit any
+  `evidence` type as free text with no owner or verification status.
+  The structured checklist engine (`internal/checklists`, roadmap item
+  4) is a separate, richer, opt-in layer alongside it — it does not
+  retrofit ownership or verification onto the original evidence
+  records.
+- **Checklist `verification_method` is descriptive only.** An item
+  marked `automated_check` documents that it's ideally machine-verified,
+  but nothing in this release wires up a channel for an automated
+  system to actually report a result — every item, regardless of this
+  field, is still verified/rejected/waived by a human through the web
+  API today.
+- **Checklist categories are a fixed 4-value enum** (`development`,
+  `uat`, `production_readiness`, `post_deployment`), matching the
+  brief's suggested categories; only the items within each category are
+  project-configurable, not the category taxonomy itself.
 - **Making the authorization check unavoidable also requires controls
   outside this repository** (GitHub Environment protection rules,
   branch protection on the workflow file, scoped cluster/registry
