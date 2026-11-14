@@ -367,11 +367,23 @@ WAYPOINT_TEST_DATABASE_URL="postgres://waypoint:waypoint@localhost:15432/waypoin
   named authorizer and justification — "emergency" changes the bar, it
   never removes it.
 
-## What I am doing next
+## Status
 
-Unless redirected, the next session of work implements item 1 (deployment
-authorization) and item 1b (the accompanying documentation) together,
-since item 1 is both the audit's top finding and the brief's own stated
-highest priority, and ships with tests for: issuance only when eligible,
-single-use consumption, expiry, and rejection of a mismatched artifact
-digest.
+All items above (1, 1b, 2–10) are DONE — this roadmap's full numbered
+list is complete. What's left is everything each item's own "Not done
+this pass" / Limitations notes already named explicitly, rather than
+anything newly discovered:
+
+- Web UI for rollback, emergency declaration/retrospective, and
+  manual deployment verification (items 7–8) — all API-only today.
+- Computed operational metrics (deployment frequency, failure rate,
+  MTTR, cycle-time) — deliberately deferred (item 9) until there is
+  enough real recorded-event history for them to mean something.
+- A handful of narrower, explicitly-flagged gaps: no file storage for
+  evidence attachments, no SSO, per-user (not per-project) roles, the
+  original free-text evidence system still unverified alongside the
+  structured checklist engine, and others — see README's Limitations
+  section for the complete, current list.
+
+No further roadmap work is pending unless new findings or a new brief
+phase are raised.
