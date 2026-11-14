@@ -223,14 +223,32 @@ authorization is traceable to a CI token or a rollback).
   README Limitations), and any automatic time limit or escalation for
   an open emergency declaration.
 
-**8. Post-deployment verification states (closes Finding 12, brief's Phase Eight).**
-Complexity: S–M. Depends on: item 1 (extends the same deployment model the
-authorization work already has to touch).
-Add `verification_pending` / `verification_passed` / `verification_failed`
-/ `rollback_initiated` / `rollback_completed` / `rollback_failed` states,
-accept both automated CI-reported verification and manual verification
-evidence, and make it impossible to confuse "the deploy step exited 0"
-with "the application is verified healthy."
+**8. Post-deployment verification states (closes Finding 12, brief's Phase Eight). — DONE.**
+Implemented: migration `0016_deployment_verification.sql` adds
+`verification_status` (`pending`/`passed`/`failed`, default `pending`),
+`verified_by`, `verified_via` (`ci`/`web`), `verified_at`, and
+`verification_note` to `deployments`.
+`deployments.Service.SubmitVerificationFromCI` (CI token) and
+`SubmitVerificationFromWeb` (same permission bar as confirming a
+checklist item — developer/coordinator/admin, not the stricter bar for
+recording a deployment) both accept a `status` + required `note`;
+either can only verify a deployment whose own `result` was `success`
+(`400` otherwise — there's nothing to confirm healthy about a
+deployment that never went out), and a verification can be
+resubmitted, each submission fully audited.
+
+The `rollback_initiated`/`rollback_completed`/`rollback_failed` half of
+this item's original description is already satisfied by item 7's
+design, not duplicated here: a rollback's lifecycle lives on its own
+`rollbacks.status` column (`pending`/`completed`/`failed`), not as a
+state on the `deployments` row, since a rollback is its own first-class
+entity with its own provenance and verification. Adding a second,
+overlapping status enum on `deployments` for the same concept would
+have been redundant.
+
+Deliberately out of scope this pass (see README Limitations):
+verification does not block the gate, a stage transition, or a later
+deployment authorization — it is a recorded, visible fact only.
 
 ## Low-risk, can happen any time — not blocked on anything above
 

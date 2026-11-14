@@ -251,11 +251,13 @@ POST   /api/v1/releases/{releaseID}/emergency-retrospective
 POST   /api/v1/releases/{releaseID}/rollbacks
 GET    /api/v1/releases/{releaseID}/rollbacks
 POST   /api/v1/releases/{releaseID}/rollbacks/{rollbackID}/verify
+POST   /api/v1/releases/{releaseID}/deployments/{deploymentID}/verification
 
 GET    /api/v1/ci/releases/{releaseID}/eligibility                      (CI token)
 POST   /api/v1/ci/releases/{releaseID}/candidates                      (CI token)
 POST   /api/v1/ci/releases/{releaseID}/deployment-authorizations        (CI token)
 POST   /api/v1/ci/releases/{releaseID}/deployments                      (CI token)
+POST   /api/v1/ci/releases/{releaseID}/deployments/{deploymentID}/verification  (CI token)
 
 GET    /healthz
 GET    /readyz
@@ -515,6 +517,40 @@ below 1, because an emergency changes the bar, it never removes it.
   default), `POST /api/v1/releases/{id}/close` is refused with `409`
   until one has been completed — an emergency release cannot be closed
   with its "what happened and why" unrecorded.
+
+## Post-deployment verification
+
+A deployment's `result` (`success`/`failure`) only records whether the
+deploy step itself exited `0`. It says nothing about whether the
+application is actually healthy afterward — those are deliberately
+different facts, never allowed to be confused.
+
+Every deployment gains `verification_status` (`pending` — the default
+on every row and never submitted explicitly — `passed`, or `failed`),
+plus `verified_by`, `verified_via` (`ci` or `web`), `verified_at`, and
+`verification_note`:
+
+- `POST /api/v1/ci/releases/{id}/deployments/{deploymentID}/verification`
+  (CI token) lets a pipeline report the result of its own automated
+  post-deployment check — e.g. a smoke-test suite run after the deploy
+  step exits `0`.
+- `POST /api/v1/releases/{id}/deployments/{deploymentID}/verification`
+  (web) lets a human manually record that they checked, held to the
+  same permission bar as confirming a checklist item
+  (developer/coordinator/admin who can see the project), not the
+  stricter admin/coordinator bar for recording a deployment in the
+  first place.
+- Either path can **only** verify a deployment whose own `result` was
+  `success` — there is nothing to confirm healthy about a deployment
+  that never actually went out; this is rejected with `400`.
+- A verification can be resubmitted — e.g. a human catching something
+  an automated check missed — and each submission overwrites the
+  previous one and is fully audited (`deployment_verification_recorded`,
+  with the before/after state).
+
+Closes [`docs/architecture-audit.md`](docs/architecture-audit.md)
+Finding 12. This is purely a recorded, visible state — it does not
+block any stage transition or the production gate; see Limitations.
 
 ## Security hardening
 
@@ -787,3 +823,18 @@ silently assumed:
   are API-only (`internal/deployments`'s rollback endpoints,
   `internal/releases`'s emergency endpoints); the frontend does not yet
   surface a "roll back" or "declare emergency" button.
+- **Post-deployment verification does not block anything.**
+  `verification_status` is a recorded, visible fact, not a new gate
+  requirement — a release can reach `post_release_support`/`closed`,
+  and a later deployment can still be authorized, regardless of
+  whether an earlier production deployment was ever verified or was
+  verified `failed`. Wiring verification into the gate or the stage
+  machine was not part of this pass; see roadmap item 8.
+- **`verification_status` defaults to `pending` on every deployment,
+  including a failed one, where it will stay `pending` forever** —
+  verification can only be submitted for a deployment whose own
+  `result` was `success`, so a failed deployment's `pending`
+  verification status is inert, not misleading (the deployment's own
+  `result` already shows the failure).
+- **No web UI for submitting a verification in this pass.** API-only,
+  same as rollback/emergency above.
