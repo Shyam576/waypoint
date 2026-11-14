@@ -96,7 +96,7 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Server {
 	gateHandlers := gate.NewHandlers(gateSvc, releasesSvc)
 
 	deploymentsStore := deployments.NewStore()
-	deploymentsSvc := deployments.NewService(pool, deploymentsStore, auditStore, gateSvc, releasesStore, releasesSvc, releasesSvc, projectsSvc)
+	deploymentsSvc := deployments.NewService(pool, deploymentsStore, auditStore, gateSvc, releasesStore, releasesSvc, releasesSvc, projectsSvc, cfg.DeployAuthTTL)
 	deploymentsHandlers := deployments.NewHandlers(deploymentsSvc)
 
 	supportStore := support.NewStore()

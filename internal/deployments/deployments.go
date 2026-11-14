@@ -67,6 +67,7 @@ type Deployment struct {
 	RecordedVia         RecordedVia `json:"recorded_via"`
 	RecordedBy          *uuid.UUID  `json:"recorded_by,omitempty"`
 	RecordedByCITokenID *uuid.UUID  `json:"recorded_by_ci_token_id,omitempty"`
+	AuthorizationID     *uuid.UUID  `json:"authorization_id,omitempty"`
 	OccurredAt          time.Time   `json:"occurred_at"`
 	CreatedAt           time.Time   `json:"created_at"`
 }
@@ -86,23 +87,24 @@ type CreateParams struct {
 	RecordedVia         RecordedVia
 	RecordedBy          *uuid.UUID
 	RecordedByCITokenID *uuid.UUID
+	AuthorizationID     *uuid.UUID
 	OccurredAt          time.Time
 }
 
 func (s *Store) Create(ctx context.Context, q dbx.Querier, p CreateParams) (Deployment, error) {
 	var d Deployment
 	err := q.QueryRow(ctx, `
-		INSERT INTO deployments (release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		RETURNING id, release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, occurred_at, created_at`,
-		p.ReleaseID, p.Environment, p.ArtifactDigest, p.ArtifactRef, p.CommitSHA, p.WorkflowRunURL, p.Result, p.RecordedVia, p.RecordedBy, p.RecordedByCITokenID, p.OccurredAt,
-	).Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL, &d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.OccurredAt, &d.CreatedAt)
+		INSERT INTO deployments (release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, authorization_id, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id, release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, authorization_id, occurred_at, created_at`,
+		p.ReleaseID, p.Environment, p.ArtifactDigest, p.ArtifactRef, p.CommitSHA, p.WorkflowRunURL, p.Result, p.RecordedVia, p.RecordedBy, p.RecordedByCITokenID, p.AuthorizationID, p.OccurredAt,
+	).Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL, &d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.AuthorizationID, &d.OccurredAt, &d.CreatedAt)
 	return d, err
 }
 
 func (s *Store) ListByRelease(ctx context.Context, q dbx.Querier, releaseID uuid.UUID) ([]Deployment, error) {
 	rows, err := q.Query(ctx, `
-		SELECT id, release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, occurred_at, created_at
+		SELECT id, release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, authorization_id, occurred_at, created_at
 		FROM deployments WHERE release_id = $1 ORDER BY occurred_at DESC`, releaseID)
 	if err != nil {
 		return nil, err
@@ -111,7 +113,7 @@ func (s *Store) ListByRelease(ctx context.Context, q dbx.Querier, releaseID uuid
 	out := []Deployment{}
 	for rows.Next() {
 		var d Deployment
-		if err := rows.Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL, &d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.OccurredAt, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL, &d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.AuthorizationID, &d.OccurredAt, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -123,7 +125,7 @@ func (s *Store) ListByRelease(ctx context.Context, q dbx.Querier, releaseID uuid
 // the caller can see, for the dashboard's "recent deployments" panel.
 func (s *Store) ListRecent(ctx context.Context, q dbx.Querier, projectIDs []uuid.UUID, limit int) ([]Deployment, error) {
 	rows, err := q.Query(ctx, `
-		SELECT d.id, d.release_id, d.environment, d.artifact_digest, d.artifact_ref, d.commit_sha, d.workflow_run_url, d.result, d.recorded_via, d.recorded_by, d.recorded_by_ci_token_id, d.occurred_at, d.created_at
+		SELECT d.id, d.release_id, d.environment, d.artifact_digest, d.artifact_ref, d.commit_sha, d.workflow_run_url, d.result, d.recorded_via, d.recorded_by, d.recorded_by_ci_token_id, d.authorization_id, d.occurred_at, d.created_at
 		FROM deployments d
 		JOIN releases r ON r.id = d.release_id
 		WHERE r.project_id = ANY($1)
@@ -136,7 +138,7 @@ func (s *Store) ListRecent(ctx context.Context, q dbx.Querier, projectIDs []uuid
 	out := []Deployment{}
 	for rows.Next() {
 		var d Deployment
-		if err := rows.Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL, &d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.OccurredAt, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL, &d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.AuthorizationID, &d.OccurredAt, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -165,20 +167,25 @@ type Service struct {
 	promoter   ReleasePromoter
 	releaseAcc ReleaseAccess
 	projects   ProjectAccess
+	authTTL    time.Duration
 }
 
-func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, gateSvc *gate.Service, releasesStore *releases.Store, promoter ReleasePromoter, releaseAccess ReleaseAccess, projectAccess ProjectAccess) *Service {
-	return &Service{pool: pool, store: store, audit: auditStore, gate: gateSvc, releases: releasesStore, promoter: promoter, releaseAcc: releaseAccess, projects: projectAccess}
+// NewService wires a deployments Service. authTTL bounds how long a
+// minted deployment authorization (see authorization.go) stays valid
+// before it must be re-issued; it has no effect on anything else.
+func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, gateSvc *gate.Service, releasesStore *releases.Store, promoter ReleasePromoter, releaseAccess ReleaseAccess, projectAccess ProjectAccess, authTTL time.Duration) *Service {
+	return &Service{pool: pool, store: store, audit: auditStore, gate: gateSvc, releases: releasesStore, promoter: promoter, releaseAcc: releaseAccess, projects: projectAccess, authTTL: authTTL}
 }
 
 type RecordInput struct {
-	Environment    Environment
-	ArtifactDigest string
-	ArtifactRef    *string
-	CommitSHA      *string
-	WorkflowRunURL string
-	Result         Result
-	OccurredAt     time.Time
+	Environment             Environment
+	ArtifactDigest          string
+	ArtifactRef             *string
+	CommitSHA               *string
+	WorkflowRunURL          string
+	Result                  Result
+	OccurredAt              time.Time
+	DeploymentAuthorization string
 }
 
 func (in RecordInput) validate() error {
@@ -198,23 +205,24 @@ func (in RecordInput) validate() error {
 }
 
 // RecordFromCI records a deployment submitted by a CI/CD pipeline using a
-// project-scoped CI token. It is the enforcement point the main user
-// flow describes: the pipeline must check eligibility first and this
-// call independently re-checks it for any production deployment, so a
-// stale client-side check can never bypass the gate.
+// project-scoped CI token. For a production deployment, it also requires
+// and consumes a deployment authorization (see authorization.go) that
+// must have been minted for this exact release and artifact digest: the
+// pipeline obtains one from IssueAuthorization (which only succeeds when
+// the gate currently says the release is eligible), and this call
+// independently re-checks the gate again and verifies the authorization
+// matches before accepting the record, so neither a stale client-side
+// check nor a stale authorization can bypass the gate.
 func (s *Service) RecordFromCI(ctx context.Context, identity authn.Identity, releaseID uuid.UUID, in RecordInput) (Deployment, error) {
-	if identity.Via != authn.ViaCI || identity.CITokenID == nil {
+	if identity.CITokenID == nil {
 		return Deployment{}, httpx.Unauthorized("ci token required")
 	}
 	if err := in.validate(); err != nil {
 		return Deployment{}, err
 	}
-	rel, err := s.releases.GetByID(ctx, s.pool, releaseID)
+	rel, err := s.resolveCIRelease(ctx, identity, releaseID)
 	if err != nil {
-		return Deployment{}, httpx.NotFound("release not found")
-	}
-	if identity.CIProjectID == nil || *identity.CIProjectID != rel.ProjectID {
-		return Deployment{}, httpx.Forbidden("this ci token is not scoped to this release's project")
+		return Deployment{}, err
 	}
 	return s.record(ctx, identity, rel, in, RecordedViaCI, nil, identity.CITokenID)
 }
@@ -243,6 +251,16 @@ func (s *Service) RecordFromWeb(ctx context.Context, identity authn.Identity, re
 	return s.record(ctx, identity, rel, in, RecordedViaWeb, &identity.User.ID, nil)
 }
 
+// requireAuthorization reports whether recording this deployment must
+// present and consume a deployment authorization: only CI-recorded
+// production deployments go through the authorization flow. A manual
+// web-recorded entry (RecordFromWeb, for admins/coordinators backfilling
+// or correcting a record) is unaffected — it is already gated on role and
+// project-management permission, and still re-checks the gate below.
+func requireAuthorization(via RecordedVia, env Environment) bool {
+	return via == RecordedViaCI && env == EnvProduction
+}
+
 func (s *Service) record(ctx context.Context, identity authn.Identity, rel releases.Release, in RecordInput, via RecordedVia, recordedBy, ciTokenID *uuid.UUID) (Deployment, error) {
 	if in.Environment == EnvProduction {
 		result, err := s.gate.Evaluate(ctx, rel.ID)
@@ -252,6 +270,9 @@ func (s *Service) record(ctx context.Context, identity authn.Identity, rel relea
 		if !result.Eligible {
 			return Deployment{}, httpx.Conflict("release is not eligible for production deployment").WithDetails(result)
 		}
+	}
+	if requireAuthorization(via, in.Environment) && in.DeploymentAuthorization == "" {
+		return Deployment{}, httpx.BadRequest("deployment_authorization_token is required for a CI-recorded production deployment; obtain one from POST .../deployment-authorizations first")
 	}
 	if in.OccurredAt.IsZero() {
 		in.OccurredAt = time.Now()
@@ -263,13 +284,33 @@ func (s *Service) record(ctx context.Context, identity authn.Identity, rel relea
 	}
 	defer tx.Rollback(ctx)
 
+	var authorizationID *uuid.UUID
+	if requireAuthorization(via, in.Environment) {
+		auth, err := s.store.ConsumeAuthorization(ctx, tx, hashAuthToken(in.DeploymentAuthorization))
+		if err != nil {
+			return Deployment{}, httpx.Forbidden("deployment authorization is invalid, expired, revoked, or already used")
+		}
+		if auth.ReleaseID != rel.ID {
+			return Deployment{}, httpx.Forbidden("deployment authorization was not issued for this release")
+		}
+		if auth.ArtifactDigest != in.ArtifactDigest {
+			return Deployment{}, httpx.Forbidden("deployment authorization does not match the artifact_digest being recorded")
+		}
+		authorizationID = &auth.ID
+	}
+
 	d, err := s.store.Create(ctx, tx, CreateParams{
 		ReleaseID: rel.ID, Environment: in.Environment, ArtifactDigest: in.ArtifactDigest, ArtifactRef: in.ArtifactRef,
 		CommitSHA: in.CommitSHA, WorkflowRunURL: in.WorkflowRunURL, Result: in.Result, RecordedVia: via,
-		RecordedBy: recordedBy, RecordedByCITokenID: ciTokenID, OccurredAt: in.OccurredAt,
+		RecordedBy: recordedBy, RecordedByCITokenID: ciTokenID, AuthorizationID: authorizationID, OccurredAt: in.OccurredAt,
 	})
 	if err != nil {
 		return Deployment{}, err
+	}
+	if authorizationID != nil {
+		if err := s.audit.Record(ctx, tx, "release", rel.ID, "deployment_authorization_consumed", identity.AuditActor(), nil, map[string]any{"authorization_id": authorizationID}, ""); err != nil {
+			return Deployment{}, err
+		}
 	}
 	if err := s.audit.Record(ctx, tx, "release", rel.ID, "deployment_recorded", identity.AuditActor(), nil, d, ""); err != nil {
 		return Deployment{}, err
@@ -297,15 +338,9 @@ func (s *Service) ListByRelease(ctx context.Context, identity authn.Identity, re
 // EligibilityForCI is the CI-token-scoped equivalent of the web
 // eligibility endpoint: same Evaluate call, different authorization path.
 func (s *Service) EligibilityForCI(ctx context.Context, identity authn.Identity, releaseID uuid.UUID) (gate.Result, error) {
-	if identity.Via != authn.ViaCI {
-		return gate.Result{}, httpx.Unauthorized("ci token required")
-	}
-	rel, err := s.releases.GetByID(ctx, s.pool, releaseID)
+	rel, err := s.resolveCIRelease(ctx, identity, releaseID)
 	if err != nil {
-		return gate.Result{}, httpx.NotFound("release not found")
+		return gate.Result{}, err
 	}
-	if identity.CIProjectID == nil || *identity.CIProjectID != rel.ProjectID {
-		return gate.Result{}, httpx.Forbidden("this ci token is not scoped to this release's project")
-	}
-	return s.gate.Evaluate(ctx, releaseID)
+	return s.gate.Evaluate(ctx, rel.ID)
 }

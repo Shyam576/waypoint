@@ -18,6 +18,7 @@ type Config struct {
 	SessionTTL          time.Duration
 	CookieSecure        bool
 	AdminBootstrapToken string
+	DeployAuthTTL       time.Duration
 	ReadTimeout         time.Duration
 	WriteTimeout        time.Duration
 	IdleTimeout         time.Duration
@@ -46,6 +47,15 @@ func Load() (Config, error) {
 	cfg.SessionTTL = time.Duration(ttlHours) * time.Hour
 
 	cfg.CookieSecure = getEnv("WAYPOINT_COOKIE_SECURE", "false") == "true"
+
+	authTTLSeconds, err := strconv.Atoi(getEnv("WAYPOINT_DEPLOY_AUTH_TTL_SECONDS", "900"))
+	if err != nil {
+		return Config{}, fmt.Errorf("WAYPOINT_DEPLOY_AUTH_TTL_SECONDS must be an integer: %w", err)
+	}
+	if authTTLSeconds <= 0 || authTTLSeconds > 3600 {
+		return Config{}, fmt.Errorf("WAYPOINT_DEPLOY_AUTH_TTL_SECONDS must be between 1 and 3600")
+	}
+	cfg.DeployAuthTTL = time.Duration(authTTLSeconds) * time.Second
 
 	cfg.ReadTimeout = 10 * time.Second
 	cfg.WriteTimeout = 15 * time.Second

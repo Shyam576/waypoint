@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -82,7 +83,7 @@ func newHarness(pool *pgxpool.Pool) *harness {
 	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc)
 	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore)
 	deploymentsStore := deployments.NewStore()
-	deploymentsSvc := deployments.NewService(pool, deploymentsStore, auditStore, gateSvc, releasesStore, releasesSvc, releasesSvc, projectsSvc)
+	deploymentsSvc := deployments.NewService(pool, deploymentsStore, auditStore, gateSvc, releasesStore, releasesSvc, releasesSvc, projectsSvc, 15*time.Minute)
 	supportStore := support.NewStore()
 	supportSvc := support.NewService(pool, supportStore, auditStore, releasesSvc)
 	mcpNotesStore := mcpnotes.NewStore()
@@ -294,11 +295,8 @@ func TestProductionDeploymentEnforcesGateAndPromotesStage(t *testing.T) {
 
 	ciIdentity := h.issueCIIdentity(t, ctx, admin, proj.ID)
 
-	_, err := h.deploymentsSvc.RecordFromCI(ctx, ciIdentity, rel.ID, deployments.RecordInput{
-		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:deadbeef", WorkflowRunURL: "https://ci.example/run/1", Result: deployments.ResultSuccess,
-	})
-	if err == nil {
-		t.Fatal("expected production deployment to be rejected: release is not eligible yet")
+	if _, _, err := h.deploymentsSvc.IssueAuthorization(ctx, ciIdentity, rel.ID, "sha256:deadbeef"); err == nil {
+		t.Fatal("expected authorization mint to be rejected: release is not eligible yet")
 	}
 
 	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
@@ -310,14 +308,23 @@ func TestProductionDeploymentEnforcesGateAndPromotesStage(t *testing.T) {
 		t.Fatalf("approve: %v", err)
 	}
 
+	_, authToken, err := h.deploymentsSvc.IssueAuthorization(ctx, ciIdentity, rel.ID, "sha256:deadbeef")
+	if err != nil {
+		t.Fatalf("expected authorization mint to succeed once eligible: %v", err)
+	}
+
 	d, err := h.deploymentsSvc.RecordFromCI(ctx, ciIdentity, rel.ID, deployments.RecordInput{
-		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:deadbeef", WorkflowRunURL: "https://ci.example/run/2", Result: deployments.ResultSuccess,
+		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:deadbeef", WorkflowRunURL: "https://ci.example/run/2",
+		Result: deployments.ResultSuccess, DeploymentAuthorization: authToken,
 	})
 	if err != nil {
 		t.Fatalf("expected eligible production deployment to succeed: %v", err)
 	}
 	if d.ArtifactDigest != "sha256:deadbeef" {
 		t.Errorf("artifact digest not stored correctly: %s", d.ArtifactDigest)
+	}
+	if d.AuthorizationID == nil {
+		t.Error("expected the deployment to record which authorization it consumed")
 	}
 
 	after, err := h.releasesSvc.GetForService(ctx, admin, rel.ID)
@@ -331,10 +338,195 @@ func TestProductionDeploymentEnforcesGateAndPromotesStage(t *testing.T) {
 	otherProjAdmin := h.createUser(t, ctx, users.RoleAdmin)
 	otherProj := h.createProject(t, ctx, otherProjAdmin)
 	wrongScopeCI := h.issueCIIdentity(t, ctx, otherProjAdmin, otherProj.ID)
-	if _, err := h.deploymentsSvc.RecordFromCI(ctx, wrongScopeCI, rel.ID, deployments.RecordInput{
-		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:other", WorkflowRunURL: "https://ci.example/run/3", Result: deployments.ResultSuccess,
+	if _, _, err := h.deploymentsSvc.IssueAuthorization(ctx, wrongScopeCI, rel.ID, "sha256:other"); err == nil {
+		t.Error("expected a ci token scoped to a different project to be rejected when minting an authorization")
+	}
+}
+
+func TestDeploymentAuthorizationRequiredForCIProduction(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence: %v", err)
+		}
+	}
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	ciIdentity := h.issueCIIdentity(t, ctx, admin, proj.ID)
+
+	// Even though the release is eligible, recording a CI production
+	// deployment with no authorization token at all must be rejected: the
+	// gate being satisfied is necessary but not sufficient — presenting a
+	// token minted for this exact artifact is also required.
+	if _, err := h.deploymentsSvc.RecordFromCI(ctx, ciIdentity, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:nodigesttoken", WorkflowRunURL: "https://ci.example/run/1", Result: deployments.ResultSuccess,
 	}); err == nil {
-		t.Error("expected a ci token scoped to a different project to be rejected")
+		t.Error("expected a CI production deployment with no authorization token to be rejected")
+	}
+
+	// Non-production environments never required an authorization and
+	// still don't.
+	if _, err := h.deploymentsSvc.RecordFromCI(ctx, ciIdentity, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvStaging, ArtifactDigest: "sha256:staging", WorkflowRunURL: "https://ci.example/run/2", Result: deployments.ResultSuccess,
+	}); err != nil {
+		t.Errorf("expected a staging deployment with no authorization to succeed: %v", err)
+	}
+}
+
+func TestDeploymentAuthorizationIsSingleUseAndArtifactBound(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence: %v", err)
+		}
+	}
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	ciIdentity := h.issueCIIdentity(t, ctx, admin, proj.ID)
+
+	_, authToken, err := h.deploymentsSvc.IssueAuthorization(ctx, ciIdentity, rel.ID, "sha256:approved")
+	if err != nil {
+		t.Fatalf("issue authorization: %v", err)
+	}
+
+	// A token minted for one digest must not authorize recording a
+	// deployment of a different digest.
+	if _, err := h.deploymentsSvc.RecordFromCI(ctx, ciIdentity, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:swapped", WorkflowRunURL: "https://ci.example/run/1",
+		Result: deployments.ResultSuccess, DeploymentAuthorization: authToken,
+	}); err == nil {
+		t.Error("expected a mismatched artifact_digest to be rejected even with a valid token")
+	}
+
+	// The same token, used correctly, succeeds exactly once.
+	if _, err := h.deploymentsSvc.RecordFromCI(ctx, ciIdentity, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:approved", WorkflowRunURL: "https://ci.example/run/2",
+		Result: deployments.ResultSuccess, DeploymentAuthorization: authToken,
+	}); err != nil {
+		t.Fatalf("expected the correctly-matched token to succeed: %v", err)
+	}
+
+	// Reusing the same (now-consumed) token must be rejected.
+	if _, err := h.deploymentsSvc.RecordFromCI(ctx, ciIdentity, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:approved", WorkflowRunURL: "https://ci.example/run/3",
+		Result: deployments.ResultSuccess, DeploymentAuthorization: authToken,
+	}); err == nil {
+		t.Error("expected reusing an already-consumed authorization token to be rejected")
+	}
+}
+
+func TestDeploymentAuthorizationConcurrentConsumptionIsSingleWinner(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence: %v", err)
+		}
+	}
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	ciIdentity := h.issueCIIdentity(t, ctx, admin, proj.ID)
+
+	_, authToken, err := h.deploymentsSvc.IssueAuthorization(ctx, ciIdentity, rel.ID, "sha256:race")
+	if err != nil {
+		t.Fatalf("issue authorization: %v", err)
+	}
+
+	const attempts = 8
+	results := make(chan error, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_, err := h.deploymentsSvc.RecordFromCI(ctx, ciIdentity, rel.ID, deployments.RecordInput{
+				Environment: deployments.EnvProduction, ArtifactDigest: "sha256:race",
+				WorkflowRunURL: fmt.Sprintf("https://ci.example/run/race-%d", n),
+				Result:         deployments.ResultSuccess, DeploymentAuthorization: authToken,
+			})
+			results <- err
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Errorf("expected exactly 1 of %d concurrent attempts with the same single-use token to succeed, got %d", attempts, successes)
+	}
+
+	deps, err := h.deploymentsSvc.ListByRelease(ctx, admin, rel.ID)
+	if err != nil {
+		t.Fatalf("list deployments: %v", err)
+	}
+	if len(deps) != 1 {
+		t.Errorf("expected exactly 1 deployment recorded from the race, got %d", len(deps))
+	}
+}
+
+func TestDeploymentAuthorizationExpires(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence: %v", err)
+		}
+	}
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	// A harness-local deployments service with a near-zero authorization
+	// TTL, so the token is already expired by the time we try to use it,
+	// without the test needing to sleep for a realistic TTL.
+	shortTTLSvc := deployments.NewService(h.pool, deployments.NewStore(), audit.NewStore(), h.gateSvc, releases.NewStore(), h.releasesSvc, h.releasesSvc, h.projectsSvc, time.Nanosecond)
+	ciIdentity := h.issueCIIdentity(t, ctx, admin, proj.ID)
+
+	_, authToken, err := shortTTLSvc.IssueAuthorization(ctx, ciIdentity, rel.ID, "sha256:expired")
+	if err != nil {
+		t.Fatalf("issue authorization: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	if _, err := shortTTLSvc.RecordFromCI(ctx, ciIdentity, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvProduction, ArtifactDigest: "sha256:expired", WorkflowRunURL: "https://ci.example/run/1",
+		Result: deployments.ResultSuccess, DeploymentAuthorization: authToken,
+	}); err == nil {
+		t.Error("expected an expired authorization token to be rejected")
 	}
 }
 

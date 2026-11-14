@@ -18,13 +18,14 @@ type Handlers struct {
 func NewHandlers(svc *Service) *Handlers { return &Handlers{Svc: svc} }
 
 type recordRequest struct {
-	Environment    Environment `json:"environment"`
-	ArtifactDigest string      `json:"artifact_digest"`
-	ArtifactRef    *string     `json:"artifact_ref"`
-	CommitSHA      *string     `json:"commit_sha"`
-	WorkflowRunURL string      `json:"workflow_run_url"`
-	Result         Result      `json:"result"`
-	OccurredAt     *time.Time  `json:"occurred_at"`
+	Environment                  Environment `json:"environment"`
+	ArtifactDigest               string      `json:"artifact_digest"`
+	ArtifactRef                  *string     `json:"artifact_ref"`
+	CommitSHA                    *string     `json:"commit_sha"`
+	WorkflowRunURL               string      `json:"workflow_run_url"`
+	Result                       Result      `json:"result"`
+	OccurredAt                   *time.Time  `json:"occurred_at"`
+	DeploymentAuthorizationToken string      `json:"deployment_authorization_token"`
 }
 
 func (req recordRequest) toInput() RecordInput {
@@ -35,7 +36,42 @@ func (req recordRequest) toInput() RecordInput {
 	return RecordInput{
 		Environment: req.Environment, ArtifactDigest: req.ArtifactDigest, ArtifactRef: req.ArtifactRef,
 		CommitSHA: req.CommitSHA, WorkflowRunURL: req.WorkflowRunURL, Result: req.Result, OccurredAt: occurredAt,
+		DeploymentAuthorization: req.DeploymentAuthorizationToken,
 	}
+}
+
+type issueAuthorizationRequest struct {
+	ArtifactDigest string `json:"artifact_digest"`
+}
+
+// IssueAuthorization handles
+// POST /api/v1/ci/releases/{releaseID}/deployment-authorizations. A CI
+// pipeline calls this once it knows the exact artifact digest it intends
+// to deploy; it only succeeds when the gate currently says the release
+// is eligible, and the returned token must be presented back to
+// RecordFromCI for the same release and digest.
+func (h *Handlers) IssueAuthorization(w http.ResponseWriter, r *http.Request) {
+	identity, ok := authn.IdentityFromContext(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("ci token required"))
+		return
+	}
+	releaseID, err := uuid.Parse(chi.URLParam(r, "releaseID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid releaseID"))
+		return
+	}
+	var req issueAuthorizationRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	auth, token, err := h.Svc.IssueAuthorization(r.Context(), identity, releaseID, req.ArtifactDigest)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, map[string]any{"authorization": auth, "token": token})
 }
 
 // RecordFromCI handles POST /api/v1/ci/releases/{releaseID}/deployments,

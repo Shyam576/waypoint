@@ -122,6 +122,7 @@ func (s *Server) Router() http.Handler {
 		api.Group(func(ci chi.Router) {
 			ci.Use(requireCI)
 			ci.Get("/ci/releases/{releaseID}/eligibility", s.DeploymentsHandlers.EligibilityForCI)
+			ci.Post("/ci/releases/{releaseID}/deployment-authorizations", s.DeploymentsHandlers.IssueAuthorization)
 			ci.Post("/ci/releases/{releaseID}/deployments", s.DeploymentsHandlers.RecordFromCI)
 		})
 	})
