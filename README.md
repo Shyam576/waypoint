@@ -18,6 +18,10 @@ for what is intentionally simplified.
 - [Main user flow](#main-user-flow)
 - [API overview](#api-overview)
 - [The production gate](#the-production-gate)
+- [Deployment authorization](#deployment-authorization)
+- [Release candidates and artifact integrity](#release-candidates-and-artifact-integrity)
+- [Structured go-live checklists](#structured-go-live-checklists)
+- [High-risk and payment change controls](#high-risk-and-payment-change-controls)
 - [GitHub Actions integration](#github-actions-integration)
 - [Claude Code / MCP setup](#claude-code--mcp-setup)
 - [Environment variables](#environment-variables)
@@ -233,6 +237,11 @@ POST   /api/v1/checklist-items/{itemID}/verify
 POST   /api/v1/checklist-items/{itemID}/reject
 POST   /api/v1/checklist-items/{itemID}/waive
 
+GET    /api/v1/projects/{projectID}/risk-policies
+PATCH  /api/v1/projects/{projectID}/risk-policies
+POST   /api/v1/releases/{releaseID}/risk-acceptance
+GET    /api/v1/releases/{releaseID}/risk-acceptance
+
 GET    /api/v1/ci/releases/{releaseID}/eligibility                      (CI token)
 POST   /api/v1/ci/releases/{releaseID}/candidates                      (CI token)
 POST   /api/v1/ci/releases/{releaseID}/deployment-authorizations        (CI token)
@@ -382,6 +391,47 @@ the free-text evidence system with a versioned, per-project checklist:
 Closes [`docs/architecture-audit.md`](docs/architecture-audit.md)
 Finding 5 for checklists specifically (evidence itself is still
 free-text and unbound to a candidate — see Limitations).
+
+## High-risk and payment change controls
+
+The motivating scenario for this whole area was a payment-related
+incident, so `risk_level` (now including a `critical` tier) is actually
+consulted by the gate — previously it was stored on every release and
+read by nothing.
+
+- A release can carry `risk_categories` — `payment`, `authentication`,
+  `schema_migration`, `infra_config`, `secrets`, `sensitive_api`,
+  `other` — tagging which sensitive areas it touches. This is
+  classification/visibility only; `risk_level` is what actually drives
+  extra requirements, not the category tags.
+- A project's policy can define extra requirements **per risk tier**
+  (`GET`/`PATCH /api/v1/projects/{id}/risk-policies`): an additional
+  required-approvals count on top of the base policy, additional
+  required evidence types, and whether explicit risk acceptance is
+  required. Every new project is seeded with sensible defaults: `high`
+  adds 1 approval; `critical` adds 1 approval, requires
+  `security_review` evidence, and requires risk acceptance. `low`/
+  `medium` get no row (no extra requirements) unless you add one.
+- These extras are folded into `gate.Evaluate` for the release's own
+  risk tier, and — like the rest of the policy — frozen into the policy
+  snapshot once the release reaches `ready_for_production`, so changing
+  a project's risk policy afterward doesn't silently affect a release
+  already in flight (same Finding 3 guarantee, extended to cover this).
+- **Explicit risk acceptance** (`POST /api/v1/releases/{id}/risk-acceptance`)
+  is a distinct, named acknowledgement that a release's risk was
+  considered and accepted — not an ordinary approval. It's held to the
+  same bar as a checklist waiver: project management permission, not
+  just edit permission.
+- Three evidence types support the brief's specific asks:
+  `config_comparison`, `smoke_test_results`, and `payment_config_check`.
+  The last is deliberately narrow: it's a slot for a CI pipeline to
+  submit the result of its own automated check that test values/gateway
+  config weren't accidentally promoted to production — **Waypoint does
+  not run any such check itself.** Nothing here is a general "detect
+  wrong business values" feature; see the `evidence.Type` doc comment.
+
+Closes [`docs/architecture-audit.md`](docs/architecture-audit.md)
+Finding 4.
 
 ## GitHub Actions integration
 
@@ -552,6 +602,22 @@ silently assumed:
   `uat`, `production_readiness`, `post_deployment`), matching the
   brief's suggested categories; only the items within each category are
   project-configurable, not the category taxonomy itself.
+- **`payment_config_check` evidence is a slot, not a scanner.** Nothing
+  in this codebase inspects config or payment gateway settings for test
+  values accidentally left in production. A CI pipeline is expected to
+  run its own check and submit the result as this evidence type; the
+  type existing does not mean Waypoint verifies anything on its own.
+- **Risk categories are tags, not policy triggers.** `risk_categories`
+  (payment, auth, schema migration, ...) is classification/visibility
+  only; only `risk_level` (low/medium/high/critical) actually drives
+  extra requirements via `project_risk_policies`. A `payment`-tagged
+  release at `risk_level: low` gets no extra requirements from that tag
+  alone.
+- **Risk acceptance doesn't revalidate on candidate/artifact change**,
+  unlike approvals (when `require_candidate_for_approval` is set).
+  Accepting a release's risk is a one-time record per release in this
+  pass; if the artifact changes afterward, the existing acceptance still
+  satisfies the gate.
 - **Making the authorization check unavoidable also requires controls
   outside this repository** (GitHub Environment protection rules,
   branch protection on the workflow file, scoped cluster/registry

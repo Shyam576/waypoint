@@ -110,17 +110,32 @@ a checklist item or a candidate; this item closes Finding 5 for
 checklists specifically, not for the pre-existing free-text evidence
 system.
 
-**5. High-risk / payment change controls (closes Finding 4).**
-Complexity: M. Depends on: item 4 (risk-tier-specific requirements are
-expressed as checklist/policy additions, not a separate system).
-Add a `critical` risk tier; let policy define extra requirements per tier
-(additional independent approval, specific evidence, a
-config-diff/"no test values in prod config" automated check where
-feasible); let a release be tagged with the high-risk categories it
-touches (payment, auth, schema migration, infra config, secrets). Keep
-machine-verifiable checks explicitly distinct from human attestations in
-the data model — do not imply Waypoint can detect every wrong business
-value.
+**5. High-risk / payment change controls (closes Finding 4). — DONE.**
+Implemented: migration `0013_risk_policies.sql`. `releases.RiskLevel`
+gains `critical`; releases can be tagged with `risk_categories`
+(`payment`/`authentication`/`schema_migration`/`infra_config`/`secrets`/
+`sensitive_api`/`other` — classification/visibility only, per the
+roadmap's original framing: risk_level is what drives policy, not the
+category tags). New `project_risk_policies` table lets a project define,
+per risk tier, an extra required-approvals count, extra required
+evidence types, and whether explicit risk acceptance is required;
+`gate.Evaluate` folds these into the base policy (and the policy
+snapshot — these extras are frozen the same way the base policy is).
+New `release_risk_acceptances` table + `releases.Service.AcceptRisk`
+(held to the same permission bar as `checklists.Waive`: project
+management, not just edit permission) implements "explicit risk
+acceptance." Three new evidence types
+(`config_comparison`/`smoke_test_results`/`payment_config_check`)
+support the brief's specific asks; `payment_config_check` is explicitly
+documented as a slot for a CI-submitted machine check, not something
+Waypoint itself runs — see the `evidence.Type` doc comment for why this
+is deliberately narrow and not a general "detect wrong business values"
+feature.
+
+Every new project is seeded with a sensible default risk policy (high:
++1 approval; critical: +1 approval, +security_review evidence, requires
+risk acceptance) so the feature works without extra setup, the same
+convention as the checklist template default in item 4.
 
 **6. Security hardening pass (closes Findings 6, 8, 9, 10, 11, 13).**
 Complexity: M, but it's six small, independent changes rather than one
