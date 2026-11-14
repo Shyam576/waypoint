@@ -10,6 +10,7 @@ package gate
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,6 +32,12 @@ type Result struct {
 	ApprovedCount                 int        `json:"approved_count"`
 	MostRecentDecisionIsRejection bool       `json:"most_recent_decision_is_rejection"`
 	CurrentCandidateID            *uuid.UUID `json:"current_candidate_id,omitempty"`
+	// PolicySnapshotAt is set once this release has entered
+	// ready_for_production at least once: from that point on, this
+	// evaluation uses the policy as it was at that moment, not whatever
+	// the project's live policy currently says. Nil means no snapshot
+	// exists yet and the live project policy is in effect.
+	PolicySnapshotAt *time.Time `json:"policy_snapshot_at,omitempty"`
 }
 
 type Service struct {
@@ -50,14 +57,45 @@ func NewService(pool *pgxpool.Pool, releasesStore *releases.Store, evidenceStore
 // no authorization check itself; callers (the web handler and the CI
 // handler) are responsible for verifying the caller may see this release
 // before calling Evaluate.
+// effectivePolicy is whichever policy actually governs this evaluation:
+// the release's frozen snapshot if it has one (see
+// migrations/0011_release_policy_snapshots.sql), otherwise the project's
+// current live policy. Kept as its own small type (rather than reusing
+// projects.Policy directly) so this package doesn't care which source it
+// came from past this point.
+type effectivePolicy struct {
+	RequiredEvidenceTypes       []string
+	RequiredApprovalsCount      int
+	BlockOnOpenRejection        bool
+	RequireCandidateForApproval bool
+}
+
 func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, error) {
 	rel, err := s.releases.GetByID(ctx, s.pool, releaseID)
 	if err != nil {
 		return Result{}, err
 	}
-	policy, err := s.projects.GetPolicy(ctx, s.pool, rel.ProjectID)
+	snapshot, err := s.releases.GetPolicySnapshot(ctx, s.pool, releaseID)
 	if err != nil {
 		return Result{}, err
+	}
+	var policy effectivePolicy
+	var policySnapshotAt *time.Time
+	if snapshot != nil {
+		policy = effectivePolicy{
+			RequiredEvidenceTypes: snapshot.RequiredEvidenceTypes, RequiredApprovalsCount: snapshot.RequiredApprovalsCount,
+			BlockOnOpenRejection: snapshot.BlockOnOpenRejection, RequireCandidateForApproval: snapshot.RequireCandidateForApproval,
+		}
+		policySnapshotAt = &snapshot.SnapshottedAt
+	} else {
+		live, err := s.projects.GetPolicy(ctx, s.pool, rel.ProjectID)
+		if err != nil {
+			return Result{}, err
+		}
+		policy = effectivePolicy{
+			RequiredEvidenceTypes: live.RequiredEvidenceTypes, RequiredApprovalsCount: live.RequiredApprovalsCount,
+			BlockOnOpenRejection: live.BlockOnOpenRejection, RequireCandidateForApproval: live.RequireCandidateForApproval,
+		}
 	}
 	present, err := s.evidence.PresentTypes(ctx, s.pool, releaseID)
 	if err != nil {
@@ -142,5 +180,6 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		ApprovedCount:                 approvedCount,
 		MostRecentDecisionIsRejection: mostRecentIsRejection,
 		CurrentCandidateID:            candidateID,
+		PolicySnapshotAt:              policySnapshotAt,
 	}, nil
 }

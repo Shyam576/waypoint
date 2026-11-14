@@ -715,3 +715,97 @@ func TestGateRequiresCandidateMatchingApprovalWhenPolicyEnabled(t *testing.T) {
 		t.Errorf("expected 0 approvals to count against the new candidate, got %d", result.ApprovedCount)
 	}
 }
+
+func TestGateUsesPolicySnapshotNotLivePolicyAfterReadyForProduction(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+
+	policy, err := h.projectsSvc.GetPolicy(ctx, admin, proj.ID)
+	if err != nil {
+		t.Fatalf("get policy: %v", err)
+	}
+	if policy.RequiredApprovalsCount != 1 {
+		t.Fatalf("expected the default policy to require 1 approval, got %d", policy.RequiredApprovalsCount)
+	}
+
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+
+	// Weaken the project's live policy to require 0 approvals AFTER the
+	// release has already entered ready_for_production.
+	if _, err := h.projectsSvc.UpdatePolicy(ctx, admin, proj.ID, projects.UpdatePolicyInput{
+		RequiredEvidenceTypes: policy.RequiredEvidenceTypes, RequiredApprovalsCount: 0,
+		BlockOnOpenRejection: policy.BlockOnOpenRejection, RequireCandidateForApproval: policy.RequireCandidateForApproval,
+	}); err != nil {
+		t.Fatalf("weaken policy: %v", err)
+	}
+
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence: %v", err)
+		}
+	}
+
+	result, err := h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if result.Eligible {
+		t.Fatal("expected the gate to still require the snapshotted 1-approval policy, not the weakened live policy")
+	}
+	if result.RequiredApprovalsCount != 1 {
+		t.Errorf("expected the snapshotted required_approvals_count of 1, got %d (live policy leaked through)", result.RequiredApprovalsCount)
+	}
+	if result.PolicySnapshotAt == nil {
+		t.Error("expected a policy snapshot to have been taken on entering ready_for_production")
+	}
+
+	// A fresh project policy change is still unrestricted for a release
+	// that has NOT yet reached ready_for_production.
+	rel2 := h.createRelease(t, ctx, dev, proj.ID)
+	result2, err := h.gateSvc.Evaluate(ctx, rel2.ID)
+	if err != nil {
+		t.Fatalf("evaluate rel2: %v", err)
+	}
+	if result2.RequiredApprovalsCount != 0 {
+		t.Errorf("expected a release that never reached ready_for_production to read the live (weakened) policy, got required_approvals_count=%d", result2.RequiredApprovalsCount)
+	}
+	if result2.PolicySnapshotAt != nil {
+		t.Error("expected no policy snapshot for a release that has never entered ready_for_production")
+	}
+
+	// Approving against the snapshotted policy makes it eligible.
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	result, err = h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !result.Eligible {
+		t.Fatalf("expected eligible after satisfying the snapshotted policy, blockers: %v", result.Blockers)
+	}
+
+	// Sending the release back to uat and re-promoting it refreshes the
+	// snapshot to whatever the live policy says now.
+	if _, err := h.releasesSvc.Transition(ctx, dev, rel.ID, releases.StageUAT, "found an issue"); err != nil {
+		t.Fatalf("transition back to uat: %v", err)
+	}
+	if _, err := h.releasesSvc.Transition(ctx, dev, rel.ID, releases.StageReadyForProduction, "fixed"); err != nil {
+		t.Fatalf("re-transition to ready_for_production: %v", err)
+	}
+	result, err = h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if result.RequiredApprovalsCount != 0 {
+		t.Errorf("expected re-entering ready_for_production to refresh the snapshot to the current live policy (0), got %d", result.RequiredApprovalsCount)
+	}
+	if !result.Eligible {
+		t.Errorf("expected the release to be eligible again with 0 required approvals, blockers: %v", result.Blockers)
+	}
+}
