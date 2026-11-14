@@ -51,6 +51,15 @@ type Result struct {
 	// been recorded. See docs/architecture-audit.md Finding 4.
 	RiskAcceptanceRequired bool `json:"risk_acceptance_required,omitempty"`
 	RiskAccepted           bool `json:"risk_accepted,omitempty"`
+	// IsEmergency/EmergencyRequiredApprovalsCount reflect a live read of
+	// releases.Release.IsEmergency — deliberately never frozen into the
+	// policy snapshot, so declaring an emergency takes effect
+	// immediately even for a release already in ready_for_production.
+	// When true, EmergencyRequiredApprovalsCount (the project's
+	// project_emergency_policies floor, never less than 1) replaces the
+	// normal RequiredApprovalsCount entirely, rather than adding to it.
+	IsEmergency                     bool `json:"is_emergency,omitempty"`
+	EmergencyRequiredApprovalsCount int  `json:"emergency_required_approvals_count,omitempty"`
 }
 
 type Service struct {
@@ -230,6 +239,26 @@ func (s *Service) EvaluateTx(ctx context.Context, q dbx.Querier, releaseID uuid.
 	// plus whatever extra this release's risk tier requires (e.g. a
 	// 'high' risk release needing one more approval than normal).
 	totalRequiredApprovals := policy.RequiredApprovalsCount + policy.ExtraRequiredApprovalsCount
+
+	// Emergency status is read live, never from the policy snapshot: an
+	// emergency declared on a release already sitting in
+	// ready_for_production must take effect immediately, which freezing
+	// it into the snapshot would prevent. It replaces the required
+	// approvals count outright (down to the project's configured floor,
+	// never below 1) rather than adding to the normal count.
+	var emergencyRequiredApprovals int
+	if rel.IsEmergency {
+		ep, err := s.projects.GetEmergencyPolicy(ctx, q, rel.ProjectID)
+		if err != nil {
+			return Result{}, err
+		}
+		emergencyRequiredApprovals = 1
+		if ep != nil {
+			emergencyRequiredApprovals = ep.RequiredApprovalsCount
+		}
+		totalRequiredApprovals = emergencyRequiredApprovals
+	}
+
 	if approvedCount < totalRequiredApprovals {
 		blockers = append(blockers, fmt.Sprintf("needs %d approval(s), has %d", totalRequiredApprovals, approvedCount))
 	}
@@ -279,18 +308,20 @@ func (s *Service) EvaluateTx(ctx context.Context, q dbx.Querier, releaseID uuid.
 	}
 
 	return Result{
-		Eligible:                      len(blockers) == 0,
-		Blockers:                      blockers,
-		Stage:                         string(rel.Stage),
-		RequiredEvidenceTypes:         allRequiredEvidenceTypes,
-		MissingEvidenceTypes:          missing,
-		RequiredApprovalsCount:        totalRequiredApprovals,
-		ApprovedCount:                 approvedCount,
-		MostRecentDecisionIsRejection: mostRecentIsRejection,
-		CurrentCandidateID:            candidateID,
-		IncompleteChecklistItems:      incomplete,
-		PolicySnapshotAt:              policySnapshotAt,
-		RiskAcceptanceRequired:        policy.RequireRiskAcceptance,
-		RiskAccepted:                  riskAccepted,
+		Eligible:                        len(blockers) == 0,
+		Blockers:                        blockers,
+		Stage:                           string(rel.Stage),
+		RequiredEvidenceTypes:           allRequiredEvidenceTypes,
+		MissingEvidenceTypes:            missing,
+		RequiredApprovalsCount:          totalRequiredApprovals,
+		ApprovedCount:                   approvedCount,
+		MostRecentDecisionIsRejection:   mostRecentIsRejection,
+		CurrentCandidateID:              candidateID,
+		IncompleteChecklistItems:        incomplete,
+		PolicySnapshotAt:                policySnapshotAt,
+		RiskAcceptanceRequired:          policy.RequireRiskAcceptance,
+		RiskAccepted:                    riskAccepted,
+		IsEmergency:                     rel.IsEmergency,
+		EmergencyRequiredApprovalsCount: emergencyRequiredApprovals,
 	}, nil
 }
