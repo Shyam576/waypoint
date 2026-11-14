@@ -39,6 +39,7 @@ type createReleaseRequest struct {
 	Name              string     `json:"name"`
 	TargetDate        *string    `json:"target_date"`
 	RiskLevel         RiskLevel  `json:"risk_level"`
+	RiskCategories    []string   `json:"risk_categories"`
 	Summary           string     `json:"summary"`
 	RollbackPlan      string     `json:"rollback_plan"`
 	SupportPeriodDays int        `json:"support_period_days"`
@@ -80,7 +81,7 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 		ownerID = *req.OwnerID
 	}
 	rel, err := h.Svc.Create(r.Context(), identity, projectID, CreateInput{
-		OwnerID: ownerID, Name: req.Name, TargetDate: targetDate, RiskLevel: req.RiskLevel,
+		OwnerID: ownerID, Name: req.Name, TargetDate: targetDate, RiskLevel: req.RiskLevel, RiskCategories: req.RiskCategories,
 		Summary: req.Summary, RollbackPlan: req.RollbackPlan, SupportPeriodDays: req.SupportPeriodDays,
 	})
 	if err != nil {
@@ -135,6 +136,7 @@ type updateReleaseRequest struct {
 	Name              string    `json:"name"`
 	TargetDate        *string   `json:"target_date"`
 	RiskLevel         RiskLevel `json:"risk_level"`
+	RiskCategories    []string  `json:"risk_categories"`
 	Summary           string    `json:"summary"`
 	RollbackPlan      string    `json:"rollback_plan"`
 	SupportPeriodDays int       `json:"support_period_days"`
@@ -161,7 +163,7 @@ func (h *Handlers) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel, err := h.Svc.UpdateMeta(r.Context(), identity, id, UpdateParams{
-		Name: req.Name, TargetDate: targetDate, RiskLevel: req.RiskLevel,
+		Name: req.Name, TargetDate: targetDate, RiskLevel: req.RiskLevel, RiskCategories: req.RiskCategories,
 		Summary: req.Summary, RollbackPlan: req.RollbackPlan, SupportPeriodDays: req.SupportPeriodDays,
 	})
 	if err != nil {
@@ -268,4 +270,53 @@ func (h *Handlers) ListLinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, list)
+}
+
+type acceptRiskRequest struct {
+	Note string `json:"note"`
+}
+
+func (h *Handlers) AcceptRisk(w http.ResponseWriter, r *http.Request) {
+	identity, ok := mustIdentity(w, r)
+	if !ok {
+		return
+	}
+	id, err := parseUUID(r, "releaseID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req acceptRiskRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	a, err := h.Svc.AcceptRisk(r.Context(), identity, id, req.Note)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, a)
+}
+
+func (h *Handlers) GetRiskAcceptance(w http.ResponseWriter, r *http.Request) {
+	identity, ok := mustIdentity(w, r)
+	if !ok {
+		return
+	}
+	id, err := parseUUID(r, "releaseID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	a, err := h.Svc.GetRiskAcceptance(r.Context(), identity, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	if a == nil {
+		httpx.Error(w, r, httpx.NotFound("this release's risk has not been accepted"))
+		return
+	}
+	httpx.JSON(w, http.StatusOK, a)
 }

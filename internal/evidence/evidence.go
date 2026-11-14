@@ -27,12 +27,27 @@ const (
 	TypeUATSignoff     Type = "uat_signoff"
 	TypeRollbackPlan   Type = "rollback_plan"
 	TypeSecurityReview Type = "security_review"
-	TypeOther          Type = "other"
+	// TypeConfigComparison, TypeSmokeTestResults, and
+	// TypePaymentConfigCheck support the brief's high-risk/payment change
+	// asks (docs/architecture-audit.md Finding 4): a configuration diff,
+	// business-critical smoke tests, and a narrowly-scoped,
+	// machine-oriented check that test values/gateway config weren't
+	// accidentally promoted to production. Submitting this evidence is
+	// no different from any other type here — nothing in this package
+	// runs an actual automated check; a CI step is expected to perform
+	// the check itself and submit the result as this evidence type. This
+	// is deliberately not a general "detect wrong business values"
+	// feature.
+	TypeConfigComparison   Type = "config_comparison"
+	TypeSmokeTestResults   Type = "smoke_test_results"
+	TypePaymentConfigCheck Type = "payment_config_check"
+	TypeOther              Type = "other"
 )
 
 func (t Type) Valid() bool {
 	switch t {
-	case TypeChangeSummary, TypeTestResults, TypeUATSignoff, TypeRollbackPlan, TypeSecurityReview, TypeOther:
+	case TypeChangeSummary, TypeTestResults, TypeUATSignoff, TypeRollbackPlan, TypeSecurityReview,
+		TypeConfigComparison, TypeSmokeTestResults, TypePaymentConfigCheck, TypeOther:
 		return true
 	}
 	return false

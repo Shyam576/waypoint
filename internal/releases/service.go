@@ -27,6 +27,12 @@ type ProjectAccess interface {
 	// ready_for_production without this package importing
 	// internal/projects for the Policy type.
 	CurrentPolicy(ctx context.Context, projectID uuid.UUID) (requiredEvidenceTypes []string, requiredApprovalsCount int, blockOnOpenRejection, requireCandidateForApproval, requireChecklistCompletion bool, err error)
+	// RiskPolicyFor returns the extra requirements a project's policy
+	// defines for one specific risk tier (zero values if none are
+	// defined for it), so Transition can fold them into the policy
+	// snapshot alongside the base policy. See
+	// docs/architecture-audit.md Finding 4.
+	RiskPolicyFor(ctx context.Context, projectID uuid.UUID, riskLevel string) (extraRequiredApprovalsCount int, extraRequiredEvidenceTypes []string, requireRiskAcceptance bool, err error)
 }
 
 type Service struct {
@@ -62,9 +68,19 @@ type CreateInput struct {
 	Name              string
 	TargetDate        *time.Time
 	RiskLevel         RiskLevel
+	RiskCategories    []string
 	Summary           string
 	RollbackPlan      string
 	SupportPeriodDays int
+}
+
+func validateRiskCategories(categories []string) error {
+	for _, c := range categories {
+		if !RiskCategory(c).Valid() {
+			return httpx.BadRequest("unknown risk category: " + c)
+		}
+	}
+	return nil
 }
 
 func (s *Service) Create(ctx context.Context, identity authn.Identity, projectID uuid.UUID, in CreateInput) (Release, error) {
@@ -79,7 +95,10 @@ func (s *Service) Create(ctx context.Context, identity authn.Identity, projectID
 		return Release{}, httpx.BadRequest("name is required")
 	}
 	if !in.RiskLevel.Valid() {
-		return Release{}, httpx.BadRequest("risk_level must be low, medium, or high")
+		return Release{}, httpx.BadRequest("risk_level must be low, medium, high, or critical")
+	}
+	if err := validateRiskCategories(in.RiskCategories); err != nil {
+		return Release{}, err
 	}
 	if in.OwnerID == uuid.Nil {
 		in.OwnerID = identity.User.ID
@@ -96,7 +115,7 @@ func (s *Service) Create(ctx context.Context, identity authn.Identity, projectID
 
 	r, err := s.store.Create(ctx, tx, CreateParams{
 		ProjectID: projectID, OwnerID: in.OwnerID, Name: in.Name, TargetDate: in.TargetDate,
-		RiskLevel: in.RiskLevel, Summary: in.Summary, RollbackPlan: in.RollbackPlan,
+		RiskLevel: in.RiskLevel, RiskCategories: in.RiskCategories, Summary: in.Summary, RollbackPlan: in.RollbackPlan,
 		SupportPeriodDays: in.SupportPeriodDays, CreatedBy: identity.User.ID,
 	})
 	if err != nil {
@@ -185,7 +204,10 @@ func (s *Service) UpdateMeta(ctx context.Context, identity authn.Identity, id uu
 		return Release{}, httpx.Forbidden("you do not have permission to edit this release")
 	}
 	if !p.RiskLevel.Valid() {
-		return Release{}, httpx.BadRequest("risk_level must be low, medium, or high")
+		return Release{}, httpx.BadRequest("risk_level must be low, medium, high, or critical")
+	}
+	if err := validateRiskCategories(p.RiskCategories); err != nil {
+		return Release{}, err
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -254,10 +276,16 @@ func (s *Service) Transition(ctx context.Context, identity authn.Identity, id uu
 		if err != nil {
 			return Release{}, err
 		}
+		extraApprovals, extraEvidence, requireRiskAccept, err := s.projects.RiskPolicyFor(ctx, before.ProjectID, string(before.RiskLevel))
+		if err != nil {
+			return Release{}, err
+		}
 		snapshotInput = &PolicySnapshotInput{
 			RequiredEvidenceTypes: reqTypes, RequiredApprovalsCount: reqCount,
 			BlockOnOpenRejection: blockReject, RequireCandidateForApproval: reqCandidate,
-			RequireChecklistCompletion: reqChecklist,
+			RequireChecklistCompletion:  reqChecklist,
+			ExtraRequiredApprovalsCount: extraApprovals, ExtraRequiredEvidenceTypes: extraEvidence,
+			RequireRiskAcceptance: requireRiskAccept,
 		}
 	}
 
@@ -374,6 +402,51 @@ func (s *Service) CreateLink(ctx context.Context, identity authn.Identity, relea
 		return Link{}, err
 	}
 	return l, nil
+}
+
+// AcceptRisk records an explicit, named acceptance of a release's risk.
+// Held to the same bar as internal/checklists' Waive (project
+// management permission, not just edit permission) since it is a
+// deliberate override, not a routine action, and internal/gate requires
+// one before eligibility whenever the matching risk policy sets
+// RequireRiskAcceptance.
+func (s *Service) AcceptRisk(ctx context.Context, identity authn.Identity, releaseID uuid.UUID, note string) (RiskAcceptance, error) {
+	rel, err := s.store.GetByID(ctx, s.pool, releaseID)
+	if err != nil {
+		return RiskAcceptance{}, httpx.NotFound("release not found")
+	}
+	ok, err := s.projects.CanManage(ctx, identity, rel.ProjectID)
+	if err != nil {
+		return RiskAcceptance{}, err
+	}
+	if !ok {
+		return RiskAcceptance{}, httpx.Forbidden("only admins and release coordinators on this project can accept a release's risk")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return RiskAcceptance{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	a, err := s.store.UpsertRiskAcceptance(ctx, tx, releaseID, identity.User.ID, note)
+	if err != nil {
+		return RiskAcceptance{}, err
+	}
+	if err := s.audit.Record(ctx, tx, "release", releaseID, "risk_accepted", identity.AuditActor(), nil, a, note); err != nil {
+		return RiskAcceptance{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RiskAcceptance{}, err
+	}
+	return a, nil
+}
+
+func (s *Service) GetRiskAcceptance(ctx context.Context, identity authn.Identity, releaseID uuid.UUID) (*RiskAcceptance, error) {
+	if _, err := s.Get(ctx, identity, releaseID); err != nil {
+		return nil, err
+	}
+	return s.store.GetRiskAcceptance(ctx, s.pool, releaseID)
 }
 
 func (s *Service) ListLinks(ctx context.Context, identity authn.Identity, releaseID uuid.UUID) ([]Link, error) {

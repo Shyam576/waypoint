@@ -32,12 +32,23 @@ func TestCanTransition(t *testing.T) {
 }
 
 func TestRiskLevelValid(t *testing.T) {
-	for _, r := range []RiskLevel{RiskLow, RiskMedium, RiskHigh} {
+	for _, r := range []RiskLevel{RiskLow, RiskMedium, RiskHigh, RiskCritical} {
 		if !r.Valid() {
 			t.Errorf("expected %s to be valid", r)
 		}
 	}
-	if RiskLevel("critical").Valid() {
-		t.Error("expected 'critical' to be invalid")
+	if RiskLevel("extreme").Valid() {
+		t.Error("expected an unknown risk level to be invalid")
+	}
+}
+
+func TestRiskCategoryValid(t *testing.T) {
+	for _, c := range []RiskCategory{RiskCategoryPayment, RiskCategoryAuthentication, RiskCategorySchemaMigration, RiskCategoryInfraConfig, RiskCategorySecrets, RiskCategorySensitiveAPI, RiskCategoryOther} {
+		if !c.Valid() {
+			t.Errorf("expected %s to be valid", c)
+		}
+	}
+	if RiskCategory("unknown").Valid() {
+		t.Error("expected an unknown risk category to be invalid")
 	}
 }

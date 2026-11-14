@@ -58,14 +58,41 @@ func CanTransition(from, to Stage) bool {
 type RiskLevel string
 
 const (
-	RiskLow    RiskLevel = "low"
-	RiskMedium RiskLevel = "medium"
-	RiskHigh   RiskLevel = "high"
+	RiskLow      RiskLevel = "low"
+	RiskMedium   RiskLevel = "medium"
+	RiskHigh     RiskLevel = "high"
+	RiskCritical RiskLevel = "critical"
 )
 
 func (r RiskLevel) Valid() bool {
 	switch r {
-	case RiskLow, RiskMedium, RiskHigh:
+	case RiskLow, RiskMedium, RiskHigh, RiskCritical:
+		return true
+	}
+	return false
+}
+
+// RiskCategory tags a release with a sensitive area it touches, per the
+// brief's examples (a payment incident was the motivating scenario).
+// This is classification/visibility only — it does not by itself change
+// gate requirements; RiskLevel is what internal/gate consults via
+// internal/projects' per-tier risk policy. See
+// docs/architecture-audit.md Finding 4.
+type RiskCategory string
+
+const (
+	RiskCategoryPayment         RiskCategory = "payment"
+	RiskCategoryAuthentication  RiskCategory = "authentication"
+	RiskCategorySchemaMigration RiskCategory = "schema_migration"
+	RiskCategoryInfraConfig     RiskCategory = "infra_config"
+	RiskCategorySecrets         RiskCategory = "secrets"
+	RiskCategorySensitiveAPI    RiskCategory = "sensitive_api"
+	RiskCategoryOther           RiskCategory = "other"
+)
+
+func (c RiskCategory) Valid() bool {
+	switch c {
+	case RiskCategoryPayment, RiskCategoryAuthentication, RiskCategorySchemaMigration, RiskCategoryInfraConfig, RiskCategorySecrets, RiskCategorySensitiveAPI, RiskCategoryOther:
 		return true
 	}
 	return false
@@ -78,6 +105,7 @@ type Release struct {
 	Name              string     `json:"name"`
 	TargetDate        *time.Time `json:"target_date,omitempty"`
 	RiskLevel         RiskLevel  `json:"risk_level"`
+	RiskCategories    []string   `json:"risk_categories"`
 	Summary           string     `json:"summary"`
 	RollbackPlan      string     `json:"rollback_plan"`
 	SupportPeriodDays int        `json:"support_period_days"`
@@ -86,6 +114,17 @@ type Release struct {
 	CreatedBy         uuid.UUID  `json:"created_by"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+// RiskAcceptance is an explicit, named acknowledgement that a release's
+// risk was considered and accepted, distinct from an ordinary approval.
+// internal/gate requires one before eligibility only when the matching
+// project_risk_policies row sets RequireRiskAcceptance.
+type RiskAcceptance struct {
+	ReleaseID  uuid.UUID `json:"release_id"`
+	AcceptedBy uuid.UUID `json:"accepted_by"`
+	Note       string    `json:"note"`
+	AcceptedAt time.Time `json:"accepted_at"`
 }
 
 type LinkType string
@@ -126,6 +165,13 @@ type PolicySnapshotInput struct {
 	BlockOnOpenRejection        bool
 	RequireCandidateForApproval bool
 	RequireChecklistCompletion  bool
+	// The following three are resolved for this release's own risk_level
+	// (internal/projects.Service.RiskPolicyFor) at snapshot time, not
+	// re-read live afterward — same freezing principle as the rest of
+	// this snapshot.
+	ExtraRequiredApprovalsCount int
+	ExtraRequiredEvidenceTypes  []string
+	RequireRiskAcceptance       bool
 }
 
 // PolicySnapshot is the frozen policy internal/gate reads once a release
@@ -138,5 +184,8 @@ type PolicySnapshot struct {
 	BlockOnOpenRejection        bool      `json:"block_on_open_rejection"`
 	RequireCandidateForApproval bool      `json:"require_candidate_for_approval"`
 	RequireChecklistCompletion  bool      `json:"require_checklist_completion"`
+	ExtraRequiredApprovalsCount int       `json:"extra_required_approvals_count"`
+	ExtraRequiredEvidenceTypes  []string  `json:"extra_required_evidence_types"`
+	RequireRiskAcceptance       bool      `json:"require_risk_acceptance"`
 	SnapshottedAt               time.Time `json:"snapshotted_at"`
 }
