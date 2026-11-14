@@ -137,6 +137,13 @@ func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, relea
 // a member of the project, unless they are an admin), and the actor is
 // never the release's own owner.
 func (s *Service) Decide(ctx context.Context, identity authn.Identity, releaseID uuid.UUID, decision Decision, comment string) (Approval, error) {
+	// Nothing reachable from an MCP token may approve or reject a
+	// release — already true today because no MCP route wires here,
+	// but checked explicitly too, independent of routing. See
+	// docs/implementation-roadmap.md item 10.
+	if identity.Via == authn.ViaMCP {
+		return Approval{}, httpx.Forbidden("mcp tokens cannot approve or reject a release")
+	}
 	rel, err := s.releases.GetForService(ctx, identity, releaseID)
 	if err != nil {
 		return Approval{}, err

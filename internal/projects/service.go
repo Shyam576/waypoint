@@ -46,7 +46,20 @@ func slugify(name string) string {
 
 // canManage is true for admins, and for project members whose global role
 // is release_coordinator. Everyone else may view but not edit.
+//
+// An MCP token is never allowed to manage a project — change its
+// policy, add a member, declare an emergency, accept risk, waive a
+// checklist item, or initiate/verify a rollback — regardless of the
+// token owner's own role. Every one of those actions routes through
+// this one function, so this is the single place that needs to say
+// so: today this is already true because no MCP route wires to any of
+// them, but this makes it true independent of routing too, which is
+// the explicit, must-stay-true rule from the brief (see
+// docs/implementation-roadmap.md item 10).
 func (s *Service) canManage(ctx context.Context, identity authn.Identity, projectID uuid.UUID) (bool, error) {
+	if identity.Via == authn.ViaMCP {
+		return false, nil
+	}
 	if identity.User.Role == users.RoleAdmin {
 		return true, nil
 	}
