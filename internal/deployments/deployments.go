@@ -57,21 +57,48 @@ const (
 	RecordedViaWeb RecordedVia = "web"
 )
 
+// VerificationStatus is distinct from Result: Result records whether
+// the deploy step itself exited 0; VerificationStatus records whether
+// the application was actually confirmed healthy afterward — the two
+// are never allowed to be confused. See
+// docs/architecture-audit.md Finding 12.
+type VerificationStatus string
+
+const (
+	VerificationPending VerificationStatus = "pending"
+	VerificationPassed  VerificationStatus = "passed"
+	VerificationFailed  VerificationStatus = "failed"
+)
+
+// VerifiedVia is who/what reported the verification result: an
+// automated CI-run health check, or a human confirming manually.
+type VerifiedVia string
+
+const (
+	VerifiedViaCI  VerifiedVia = "ci"
+	VerifiedViaWeb VerifiedVia = "web"
+)
+
 type Deployment struct {
-	ID                  uuid.UUID   `json:"id"`
-	ReleaseID           uuid.UUID   `json:"release_id"`
-	Environment         Environment `json:"environment"`
-	ArtifactDigest      string      `json:"artifact_digest"`
-	ArtifactRef         *string     `json:"artifact_ref,omitempty"`
-	CommitSHA           *string     `json:"commit_sha,omitempty"`
-	WorkflowRunURL      string      `json:"workflow_run_url"`
-	Result              Result      `json:"result"`
-	RecordedVia         RecordedVia `json:"recorded_via"`
-	RecordedBy          *uuid.UUID  `json:"recorded_by,omitempty"`
-	RecordedByCITokenID *uuid.UUID  `json:"recorded_by_ci_token_id,omitempty"`
-	AuthorizationID     *uuid.UUID  `json:"authorization_id,omitempty"`
-	OccurredAt          time.Time   `json:"occurred_at"`
-	CreatedAt           time.Time   `json:"created_at"`
+	ID                  uuid.UUID          `json:"id"`
+	ReleaseID           uuid.UUID          `json:"release_id"`
+	Environment         Environment        `json:"environment"`
+	ArtifactDigest      string             `json:"artifact_digest"`
+	ArtifactRef         *string            `json:"artifact_ref,omitempty"`
+	CommitSHA           *string            `json:"commit_sha,omitempty"`
+	WorkflowRunURL      string             `json:"workflow_run_url"`
+	Result              Result             `json:"result"`
+	RecordedVia         RecordedVia        `json:"recorded_via"`
+	RecordedBy          *uuid.UUID         `json:"recorded_by,omitempty"`
+	RecordedByCITokenID *uuid.UUID         `json:"recorded_by_ci_token_id,omitempty"`
+	AuthorizationID     *uuid.UUID         `json:"authorization_id,omitempty"`
+	OccurredAt          time.Time          `json:"occurred_at"`
+	CreatedAt           time.Time          `json:"created_at"`
+	VerificationStatus  VerificationStatus `json:"verification_status"`
+	VerifiedBy          *uuid.UUID         `json:"verified_by,omitempty"`
+	VerifiedVia         *VerifiedVia       `json:"verified_via,omitempty"`
+	VerifiedAt          *time.Time         `json:"verified_at,omitempty"`
+	VerificationNote    string             `json:"verification_note"`
 }
 
 type Store struct{}
@@ -93,12 +120,13 @@ type CreateParams struct {
 	OccurredAt          time.Time
 }
 
-const deploymentColumns = `id, release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, authorization_id, occurred_at, created_at`
+const deploymentColumns = `id, release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, authorization_id, occurred_at, created_at, verification_status, verified_by, verified_via, verified_at, verification_note`
 
 func scanDeployment(row pgx.Row) (Deployment, error) {
 	var d Deployment
 	err := row.Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL,
-		&d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.AuthorizationID, &d.OccurredAt, &d.CreatedAt)
+		&d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.AuthorizationID, &d.OccurredAt, &d.CreatedAt,
+		&d.VerificationStatus, &d.VerifiedBy, &d.VerifiedVia, &d.VerifiedAt, &d.VerificationNote)
 	return d, err
 }
 
@@ -161,6 +189,11 @@ func (s *Store) ListRecent(ctx context.Context, q dbx.Querier, projectIDs []uuid
 
 type ReleaseAccess interface {
 	GetForService(ctx context.Context, identity authn.Identity, id uuid.UUID) (releases.Release, error)
+	// CanEdit backs SubmitVerificationFromWeb: the same bar
+	// internal/checklists uses for confirming (not waiving) a checklist
+	// item — a developer/coordinator/admin who can see the project, not
+	// just anyone with release visibility.
+	CanEdit(ctx context.Context, identity authn.Identity, projectID uuid.UUID) (bool, error)
 }
 
 type ReleasePromoter interface {

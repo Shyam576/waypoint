@@ -239,6 +239,73 @@ func (h *Handlers) VerifyRollback(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, rb)
 }
 
+type submitVerificationRequest struct {
+	Status VerificationStatus `json:"status"`
+	Note   string             `json:"note"`
+}
+
+// SubmitVerificationFromCI handles
+// POST /api/v1/ci/releases/{releaseID}/deployments/{deploymentID}/verification.
+func (h *Handlers) SubmitVerificationFromCI(w http.ResponseWriter, r *http.Request) {
+	identity, ok := authn.IdentityFromContext(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("ci token required"))
+		return
+	}
+	releaseID, err := uuid.Parse(chi.URLParam(r, "releaseID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid releaseID"))
+		return
+	}
+	deploymentID, err := uuid.Parse(chi.URLParam(r, "deploymentID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid deploymentID"))
+		return
+	}
+	var req submitVerificationRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	d, err := h.Svc.SubmitVerificationFromCI(r.Context(), identity, releaseID, deploymentID, SubmitVerificationInput{Status: req.Status, Note: req.Note})
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, d)
+}
+
+// SubmitVerificationFromWeb handles
+// POST /api/v1/releases/{releaseID}/deployments/{deploymentID}/verification.
+func (h *Handlers) SubmitVerificationFromWeb(w http.ResponseWriter, r *http.Request) {
+	identity, ok := authn.IdentityFromContext(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("sign in required"))
+		return
+	}
+	releaseID, err := uuid.Parse(chi.URLParam(r, "releaseID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid releaseID"))
+		return
+	}
+	deploymentID, err := uuid.Parse(chi.URLParam(r, "deploymentID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid deploymentID"))
+		return
+	}
+	var req submitVerificationRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	d, err := h.Svc.SubmitVerificationFromWeb(r.Context(), identity, releaseID, deploymentID, SubmitVerificationInput{Status: req.Status, Note: req.Note})
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, d)
+}
+
 // ListRollbacksByRelease handles GET /api/v1/releases/{releaseID}/rollbacks.
 func (h *Handlers) ListRollbacksByRelease(w http.ResponseWriter, r *http.Request) {
 	identity, ok := authn.IdentityFromContext(r.Context())

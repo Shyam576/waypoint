@@ -127,6 +127,7 @@ func (s *Server) Router() http.Handler {
 			web.Post("/releases/{releaseID}/rollbacks", s.DeploymentsHandlers.InitiateRollback)
 			web.Get("/releases/{releaseID}/rollbacks", s.DeploymentsHandlers.ListRollbacksByRelease)
 			web.Post("/releases/{releaseID}/rollbacks/{rollbackID}/verify", s.DeploymentsHandlers.VerifyRollback)
+			web.Post("/releases/{releaseID}/deployments/{deploymentID}/verification", s.DeploymentsHandlers.SubmitVerificationFromWeb)
 
 			web.Post("/releases/{releaseID}/support-items", s.SupportHandlers.Create)
 			web.Get("/releases/{releaseID}/support-items", s.SupportHandlers.ListByRelease)
@@ -157,6 +158,7 @@ func (s *Server) Router() http.Handler {
 			ci.Post("/ci/releases/{releaseID}/candidates", s.CandidatesHandlers.RegisterFromCI)
 			ci.Post("/ci/releases/{releaseID}/deployment-authorizations", s.DeploymentsHandlers.IssueAuthorization)
 			ci.Post("/ci/releases/{releaseID}/deployments", s.DeploymentsHandlers.RecordFromCI)
+			ci.Post("/ci/releases/{releaseID}/deployments/{deploymentID}/verification", s.DeploymentsHandlers.SubmitVerificationFromCI)
 		})
 	})
 
