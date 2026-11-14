@@ -1011,3 +1011,160 @@ func TestGateRequiresChecklistCompletionWhenPolicyEnabled(t *testing.T) {
 		t.Errorf("expected no incomplete checklist items, got %v", result.IncompleteChecklistItems)
 	}
 }
+
+func TestDefaultRiskPoliciesSeededForHighAndCritical(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	proj := h.createProject(t, ctx, admin)
+
+	policies, err := h.projectsSvc.ListRiskPolicies(ctx, admin, proj.ID)
+	if err != nil {
+		t.Fatalf("list risk policies: %v", err)
+	}
+	byTier := map[string]projects.RiskPolicy{}
+	for _, p := range policies {
+		byTier[p.RiskLevel] = p
+	}
+	high, ok := byTier["high"]
+	if !ok {
+		t.Fatal("expected a seeded risk policy for 'high'")
+	}
+	if high.ExtraRequiredApprovalsCount != 1 || high.RequireRiskAcceptance {
+		t.Errorf("unexpected default 'high' risk policy: %+v", high)
+	}
+	critical, ok := byTier["critical"]
+	if !ok {
+		t.Fatal("expected a seeded risk policy for 'critical'")
+	}
+	if critical.ExtraRequiredApprovalsCount != 1 || !critical.RequireRiskAcceptance {
+		t.Errorf("unexpected default 'critical' risk policy: %+v", critical)
+	}
+	foundSecurityReview := false
+	for _, e := range critical.ExtraRequiredEvidenceTypes {
+		if e == "security_review" {
+			foundSecurityReview = true
+		}
+	}
+	if !foundSecurityReview {
+		t.Errorf("expected 'critical' to default to requiring security_review evidence, got %v", critical.ExtraRequiredEvidenceTypes)
+	}
+	if _, ok := byTier["low"]; ok {
+		t.Error("expected no seeded risk policy for 'low'")
+	}
+}
+
+func TestGateAppliesExtraApprovalsForHighRiskRelease(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver1 := h.createUser(t, ctx, users.RoleApprover)
+	approver2 := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver1, approver2)
+
+	rel, err := h.releasesSvc.Create(ctx, dev, proj.ID, releases.CreateInput{
+		Name: "v-high-risk", RiskLevel: releases.RiskHigh, Summary: "high risk release", RollbackPlan: "revert",
+	})
+	if err != nil {
+		t.Fatalf("create high-risk release: %v", err)
+	}
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence: %v", err)
+		}
+	}
+
+	if _, err := h.approvalsSvc.Decide(ctx, approver1, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve 1: %v", err)
+	}
+	result, err := h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if result.Eligible {
+		t.Fatal("expected a high-risk release to need 2 approvals (1 base + 1 extra), not 1")
+	}
+	if result.RequiredApprovalsCount != 2 {
+		t.Errorf("expected RequiredApprovalsCount to reflect the extra requirement (2), got %d", result.RequiredApprovalsCount)
+	}
+
+	if _, err := h.approvalsSvc.Decide(ctx, approver2, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve 2: %v", err)
+	}
+	result, err = h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !result.Eligible {
+		t.Fatalf("expected eligible with 2 approvals, blockers: %v", result.Blockers)
+	}
+}
+
+func TestGateRequiresRiskAcceptanceAndExtraEvidenceForCriticalRelease(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver1 := h.createUser(t, ctx, users.RoleApprover)
+	approver2 := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver1, approver2)
+
+	rel, err := h.releasesSvc.Create(ctx, dev, proj.ID, releases.CreateInput{
+		Name: "v-critical-risk", RiskLevel: releases.RiskCritical, RiskCategories: []string{"payment"},
+		Summary: "critical payment release", RollbackPlan: "revert",
+	})
+	if err != nil {
+		t.Fatalf("create critical release: %v", err)
+	}
+	if len(rel.RiskCategories) != 1 || rel.RiskCategories[0] != "payment" {
+		t.Errorf("expected risk_categories to be stored, got %v", rel.RiskCategories)
+	}
+
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence: %v", err)
+		}
+	}
+	if _, err := h.approvalsSvc.Decide(ctx, approver1, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve 1: %v", err)
+	}
+	if _, err := h.approvalsSvc.Decide(ctx, approver2, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve 2: %v", err)
+	}
+
+	result, err := h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if result.Eligible {
+		t.Fatal("expected a critical release to still be blocked: missing security_review evidence and risk acceptance")
+	}
+	if !result.RiskAcceptanceRequired || result.RiskAccepted {
+		t.Errorf("expected risk acceptance to be required and not yet accepted, got required=%v accepted=%v", result.RiskAcceptanceRequired, result.RiskAccepted)
+	}
+
+	if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, evidence.TypeSecurityReview, "security review", "ok", nil); err != nil {
+		t.Fatalf("submit security review evidence: %v", err)
+	}
+
+	if _, err := h.releasesSvc.AcceptRisk(ctx, dev, rel.ID, "trying as a developer"); err == nil {
+		t.Error("expected a developer (non-admin, non-coordinator) to be forbidden from accepting risk")
+	}
+	if _, err := h.releasesSvc.AcceptRisk(ctx, admin, rel.ID, "reviewed and accepted"); err != nil {
+		t.Fatalf("accept risk as admin: %v", err)
+	}
+
+	result, err = h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !result.Eligible {
+		t.Fatalf("expected eligible once security review is submitted and risk is accepted, blockers: %v", result.Blockers)
+	}
+	if !result.RiskAccepted {
+		t.Error("expected RiskAccepted to be true")
+	}
+}

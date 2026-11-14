@@ -66,6 +66,8 @@ func (s *Server) Router() http.Handler {
 			web.Patch("/projects/{projectID}", s.ProjectsHandlers.Update)
 			web.Get("/projects/{projectID}/policy", s.ProjectsHandlers.GetPolicy)
 			web.Patch("/projects/{projectID}/policy", s.ProjectsHandlers.UpdatePolicy)
+			web.Get("/projects/{projectID}/risk-policies", s.ProjectsHandlers.ListRiskPolicies)
+			web.Patch("/projects/{projectID}/risk-policies", s.ProjectsHandlers.UpdateRiskPolicy)
 			web.Post("/projects/{projectID}/members", s.ProjectsHandlers.AddMember)
 			web.Get("/projects/{projectID}/members", s.ProjectsHandlers.ListMembers)
 			web.Post("/projects/{projectID}/ci-tokens", s.issueCIToken)
@@ -79,6 +81,8 @@ func (s *Server) Router() http.Handler {
 			web.Patch("/releases/{releaseID}", s.ReleasesHandlers.Update)
 			web.Post("/releases/{releaseID}/transition", s.ReleasesHandlers.Transition)
 			web.Post("/releases/{releaseID}/close", s.ReleasesHandlers.Close)
+			web.Post("/releases/{releaseID}/risk-acceptance", s.ReleasesHandlers.AcceptRisk)
+			web.Get("/releases/{releaseID}/risk-acceptance", s.ReleasesHandlers.GetRiskAcceptance)
 			web.Get("/releases/{releaseID}/full", s.releaseDetail)
 			web.Get("/releases/{releaseID}/activity", s.releaseActivity)
 

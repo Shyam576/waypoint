@@ -2,6 +2,7 @@ package projects
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -111,6 +112,64 @@ func (s *Store) UpdatePolicy(ctx context.Context, q dbx.Querier, projectID uuid.
 		projectID, requiredEvidenceTypes, requiredApprovalsCount, blockOnOpenRejection, requireCandidateForApproval, requireChecklistCompletion, updatedBy,
 	).Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.RequireChecklistCompletion, &p.UpdatedBy, &p.UpdatedAt)
 	return p, err
+}
+
+const riskPolicyColumns = `id, project_id, risk_level, extra_required_approvals_count, extra_required_evidence_types, require_risk_acceptance, updated_by, updated_at`
+
+func scanRiskPolicy(row pgx.Row) (RiskPolicy, error) {
+	var p RiskPolicy
+	err := row.Scan(&p.ID, &p.ProjectID, &p.RiskLevel, &p.ExtraRequiredApprovalsCount, &p.ExtraRequiredEvidenceTypes, &p.RequireRiskAcceptance, &p.UpdatedBy, &p.UpdatedAt)
+	return p, err
+}
+
+func (s *Store) UpsertRiskPolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID, riskLevel string, extraApprovals int, extraEvidenceTypes []string, requireRiskAcceptance bool, updatedBy *uuid.UUID) (RiskPolicy, error) {
+	if extraEvidenceTypes == nil {
+		extraEvidenceTypes = []string{}
+	}
+	row := q.QueryRow(ctx, `
+		INSERT INTO project_risk_policies (project_id, risk_level, extra_required_approvals_count, extra_required_evidence_types, require_risk_acceptance, updated_by)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (project_id, risk_level) DO UPDATE SET
+			extra_required_approvals_count = EXCLUDED.extra_required_approvals_count,
+			extra_required_evidence_types = EXCLUDED.extra_required_evidence_types,
+			require_risk_acceptance = EXCLUDED.require_risk_acceptance,
+			updated_by = EXCLUDED.updated_by,
+			updated_at = now()
+		RETURNING `+riskPolicyColumns,
+		projectID, riskLevel, extraApprovals, extraEvidenceTypes, requireRiskAcceptance, updatedBy,
+	)
+	return scanRiskPolicy(row)
+}
+
+// GetRiskPolicy returns (nil, nil) if the project has no extra
+// requirements defined for this risk tier.
+func (s *Store) GetRiskPolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID, riskLevel string) (*RiskPolicy, error) {
+	row := q.QueryRow(ctx, `SELECT `+riskPolicyColumns+` FROM project_risk_policies WHERE project_id = $1 AND risk_level = $2`, projectID, riskLevel)
+	p, err := scanRiskPolicy(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (s *Store) ListRiskPolicies(ctx context.Context, q dbx.Querier, projectID uuid.UUID) ([]RiskPolicy, error) {
+	rows, err := q.Query(ctx, `SELECT `+riskPolicyColumns+` FROM project_risk_policies WHERE project_id = $1 ORDER BY risk_level`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []RiskPolicy{}
+	for rows.Next() {
+		p, err := scanRiskPolicy(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) AddMember(ctx context.Context, q dbx.Querier, projectID, userID uuid.UUID) error {

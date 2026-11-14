@@ -44,6 +44,12 @@ type Result struct {
 	// the project's live policy currently says. Nil means no snapshot
 	// exists yet and the live project policy is in effect.
 	PolicySnapshotAt *time.Time `json:"policy_snapshot_at,omitempty"`
+	// RiskAcceptanceRequired/RiskAccepted reflect the release's own
+	// risk-tier policy (internal/projects.RiskPolicy): whether this tier
+	// requires an explicit risk acceptance at all, and whether one has
+	// been recorded. See docs/architecture-audit.md Finding 4.
+	RiskAcceptanceRequired bool `json:"risk_acceptance_required,omitempty"`
+	RiskAccepted           bool `json:"risk_accepted,omitempty"`
 }
 
 type Service struct {
@@ -76,6 +82,9 @@ type effectivePolicy struct {
 	BlockOnOpenRejection        bool
 	RequireCandidateForApproval bool
 	RequireChecklistCompletion  bool
+	ExtraRequiredApprovalsCount int
+	ExtraRequiredEvidenceTypes  []string
+	RequireRiskAcceptance       bool
 }
 
 func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, error) {
@@ -93,7 +102,9 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		policy = effectivePolicy{
 			RequiredEvidenceTypes: snapshot.RequiredEvidenceTypes, RequiredApprovalsCount: snapshot.RequiredApprovalsCount,
 			BlockOnOpenRejection: snapshot.BlockOnOpenRejection, RequireCandidateForApproval: snapshot.RequireCandidateForApproval,
-			RequireChecklistCompletion: snapshot.RequireChecklistCompletion,
+			RequireChecklistCompletion:  snapshot.RequireChecklistCompletion,
+			ExtraRequiredApprovalsCount: snapshot.ExtraRequiredApprovalsCount, ExtraRequiredEvidenceTypes: snapshot.ExtraRequiredEvidenceTypes,
+			RequireRiskAcceptance: snapshot.RequireRiskAcceptance,
 		}
 		policySnapshotAt = &snapshot.SnapshottedAt
 	} else {
@@ -105,6 +116,15 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 			RequiredEvidenceTypes: live.RequiredEvidenceTypes, RequiredApprovalsCount: live.RequiredApprovalsCount,
 			BlockOnOpenRejection: live.BlockOnOpenRejection, RequireCandidateForApproval: live.RequireCandidateForApproval,
 			RequireChecklistCompletion: live.RequireChecklistCompletion,
+		}
+		riskPolicy, err := s.projects.GetRiskPolicy(ctx, s.pool, rel.ProjectID, string(rel.RiskLevel))
+		if err != nil {
+			return Result{}, err
+		}
+		if riskPolicy != nil {
+			policy.ExtraRequiredApprovalsCount = riskPolicy.ExtraRequiredApprovalsCount
+			policy.ExtraRequiredEvidenceTypes = riskPolicy.ExtraRequiredEvidenceTypes
+			policy.RequireRiskAcceptance = riskPolicy.RequireRiskAcceptance
 		}
 	}
 	present, err := s.evidence.PresentTypes(ctx, s.pool, releaseID)
@@ -130,8 +150,24 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		blockers = append(blockers, fmt.Sprintf("release must be in the Ready for Production stage (currently: %s)", rel.Stage))
 	}
 
+	// The effective required-evidence set is the base policy's types plus
+	// any extra types this release's risk tier requires (e.g. 'critical'
+	// defaults to adding security_review) — deduplicated, since a tier's
+	// extra type may already be in the base set.
+	allRequiredEvidenceTypes := append([]string{}, policy.RequiredEvidenceTypes...)
+	seenEvidenceTypes := map[string]bool{}
+	for _, t := range allRequiredEvidenceTypes {
+		seenEvidenceTypes[t] = true
+	}
+	for _, t := range policy.ExtraRequiredEvidenceTypes {
+		if !seenEvidenceTypes[t] {
+			allRequiredEvidenceTypes = append(allRequiredEvidenceTypes, t)
+			seenEvidenceTypes[t] = true
+		}
+	}
+
 	var missing []string
-	for _, t := range policy.RequiredEvidenceTypes {
+	for _, t := range allRequiredEvidenceTypes {
 		if !present[t] {
 			missing = append(missing, t)
 		}
@@ -174,8 +210,12 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 			mostRecent = &a
 		}
 	}
-	if approvedCount < policy.RequiredApprovalsCount {
-		blockers = append(blockers, fmt.Sprintf("needs %d approval(s), has %d", policy.RequiredApprovalsCount, approvedCount))
+	// The effective required-approvals count is the base policy's count
+	// plus whatever extra this release's risk tier requires (e.g. a
+	// 'high' risk release needing one more approval than normal).
+	totalRequiredApprovals := policy.RequiredApprovalsCount + policy.ExtraRequiredApprovalsCount
+	if approvedCount < totalRequiredApprovals {
+		blockers = append(blockers, fmt.Sprintf("needs %d approval(s), has %d", totalRequiredApprovals, approvedCount))
 	}
 
 	mostRecentIsRejection := false
@@ -205,17 +245,36 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		}
 	}
 
+	// A release at a risk tier whose policy sets RequireRiskAcceptance
+	// needs an explicit, named acceptance (internal/releases.AcceptRisk)
+	// before it's eligible, regardless of how many ordinary approvals it
+	// has — approving a change and knowingly accepting its risk are
+	// different acts.
+	riskAccepted := false
+	if policy.RequireRiskAcceptance {
+		acceptance, err := s.releases.GetRiskAcceptance(ctx, s.pool, releaseID)
+		if err != nil {
+			return Result{}, err
+		}
+		riskAccepted = acceptance != nil
+		if !riskAccepted {
+			blockers = append(blockers, fmt.Sprintf("explicit risk acceptance required for a %s risk release", rel.RiskLevel))
+		}
+	}
+
 	return Result{
 		Eligible:                      len(blockers) == 0,
 		Blockers:                      blockers,
 		Stage:                         string(rel.Stage),
-		RequiredEvidenceTypes:         policy.RequiredEvidenceTypes,
+		RequiredEvidenceTypes:         allRequiredEvidenceTypes,
 		MissingEvidenceTypes:          missing,
-		RequiredApprovalsCount:        policy.RequiredApprovalsCount,
+		RequiredApprovalsCount:        totalRequiredApprovals,
 		ApprovedCount:                 approvedCount,
 		MostRecentDecisionIsRejection: mostRecentIsRejection,
 		CurrentCandidateID:            candidateID,
 		IncompleteChecklistItems:      incomplete,
 		PolicySnapshotAt:              policySnapshotAt,
+		RiskAcceptanceRequired:        policy.RequireRiskAcceptance,
+		RiskAccepted:                  riskAccepted,
 	}, nil
 }

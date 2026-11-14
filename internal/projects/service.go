@@ -105,6 +105,16 @@ func (s *Service) Create(ctx context.Context, identity authn.Identity, in Create
 			if err := s.checklists.SeedDefaultTemplate(ctx, tx, p.ID, &identity.User.ID); err != nil {
 				return Project{}, err
 			}
+			// Sensible starter risk policy: 'high' needs one more
+			// approval than the base policy; 'critical' additionally
+			// requires a security review and explicit risk acceptance.
+			// 'low'/'medium' get no row (no extra requirements).
+			if _, err := s.store.UpsertRiskPolicy(ctx, tx, p.ID, "high", 1, nil, false, &identity.User.ID); err != nil {
+				return Project{}, err
+			}
+			if _, err := s.store.UpsertRiskPolicy(ctx, tx, p.ID, "critical", 1, []string{"security_review"}, true, &identity.User.ID); err != nil {
+				return Project{}, err
+			}
 			if err := s.audit.Record(ctx, tx, "project", p.ID, "project_created", identity.AuditActor(), nil, p, ""); err != nil {
 				return Project{}, err
 			}
@@ -321,4 +331,92 @@ func (s *Service) CurrentPolicy(ctx context.Context, projectID uuid.UUID) ([]str
 		return nil, 0, false, false, false, err
 	}
 	return p.RequiredEvidenceTypes, p.RequiredApprovalsCount, p.BlockOnOpenRejection, p.RequireCandidateForApproval, p.RequireChecklistCompletion, nil
+}
+
+// RiskPolicyFor returns the extra requirements this project defines for
+// one risk tier, or all-zero values if it has none — no authorization
+// check of its own, for the same reason and the same callers as
+// CurrentPolicy (internal/releases, internal/gate).
+func (s *Service) RiskPolicyFor(ctx context.Context, projectID uuid.UUID, riskLevel string) (int, []string, bool, error) {
+	p, err := s.store.GetRiskPolicy(ctx, s.pool, projectID, riskLevel)
+	if err != nil {
+		return 0, nil, false, err
+	}
+	if p == nil {
+		return 0, nil, false, nil
+	}
+	return p.ExtraRequiredApprovalsCount, p.ExtraRequiredEvidenceTypes, p.RequireRiskAcceptance, nil
+}
+
+func (s *Service) GetRiskPolicy(ctx context.Context, identity authn.Identity, projectID uuid.UUID, riskLevel string) (*RiskPolicy, error) {
+	ok, err := s.canView(ctx, identity, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, httpx.Forbidden("you do not have access to this project")
+	}
+	return s.store.GetRiskPolicy(ctx, s.pool, projectID, riskLevel)
+}
+
+func (s *Service) ListRiskPolicies(ctx context.Context, identity authn.Identity, projectID uuid.UUID) ([]RiskPolicy, error) {
+	ok, err := s.canView(ctx, identity, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, httpx.Forbidden("you do not have access to this project")
+	}
+	return s.store.ListRiskPolicies(ctx, s.pool, projectID)
+}
+
+type UpdateRiskPolicyInput struct {
+	RiskLevel                   string
+	ExtraRequiredApprovalsCount int
+	ExtraRequiredEvidenceTypes  []string
+	RequireRiskAcceptance       bool
+}
+
+func (s *Service) UpdateRiskPolicy(ctx context.Context, identity authn.Identity, projectID uuid.UUID, in UpdateRiskPolicyInput) (RiskPolicy, error) {
+	ok, err := s.canManage(ctx, identity, projectID)
+	if err != nil {
+		return RiskPolicy{}, err
+	}
+	if !ok {
+		return RiskPolicy{}, httpx.Forbidden("only admins and release coordinators on this project can edit its risk policy")
+	}
+	if !ValidRiskLevels[in.RiskLevel] {
+		return RiskPolicy{}, httpx.BadRequest("risk_level must be low, medium, high, or critical")
+	}
+	if in.ExtraRequiredApprovalsCount < 0 {
+		return RiskPolicy{}, httpx.BadRequest("extra_required_approvals_count cannot be negative")
+	}
+	for _, t := range in.ExtraRequiredEvidenceTypes {
+		if !ValidEvidenceTypes[t] {
+			return RiskPolicy{}, httpx.BadRequest("unknown evidence type: " + t)
+		}
+	}
+
+	before, err := s.store.GetRiskPolicy(ctx, s.pool, projectID, in.RiskLevel)
+	if err != nil {
+		return RiskPolicy{}, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return RiskPolicy{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	after, err := s.store.UpsertRiskPolicy(ctx, tx, projectID, in.RiskLevel, in.ExtraRequiredApprovalsCount, in.ExtraRequiredEvidenceTypes, in.RequireRiskAcceptance, &identity.User.ID)
+	if err != nil {
+		return RiskPolicy{}, err
+	}
+	if err := s.audit.Record(ctx, tx, "project", projectID, "risk_policy_updated", identity.AuditActor(), before, after, ""); err != nil {
+		return RiskPolicy{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RiskPolicy{}, err
+	}
+	return after, nil
 }

@@ -36,6 +36,7 @@ type ReleaseDetail struct {
 	SupportItems    []support.Item            `json:"support_items"`
 	PendingMCP      []mcpnotes.Submission     `json:"pending_mcp_submissions"`
 	Eligibility     gate.Result               `json:"eligibility"`
+	RiskAcceptance  *releases.RiskAcceptance  `json:"risk_acceptance,omitempty"`
 	Activity        []audit.Entry             `json:"activity"`
 }
 
@@ -113,6 +114,11 @@ func (s *Server) releaseDetail(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
+	riskAcceptance, err := s.ReleasesStore.GetRiskAcceptance(r.Context(), s.Pool, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	activity, err := s.Audit.ForEntity(r.Context(), s.Pool, "release", id)
 	if err != nil {
 		httpx.Error(w, r, err)
@@ -124,7 +130,7 @@ func (s *Server) releaseDetail(w http.ResponseWriter, r *http.Request) {
 		ChecklistItems: nonNilChecklistItems(checklistItems),
 		ChangeNotes:    nonNilChangeNotes(changeNotes), DesignDecisions: nonNilDesignDecisions(designDecisions),
 		Approvals: nonNilApprovals(apprs), Deployments: nonNilDeployments(deps), SupportItems: nonNilSupport(supportItems),
-		PendingMCP: nonNilSubmissions(pending), Eligibility: eligibility, Activity: nonNilActivity(activity),
+		PendingMCP: nonNilSubmissions(pending), Eligibility: eligibility, RiskAcceptance: riskAcceptance, Activity: nonNilActivity(activity),
 	})
 }
 

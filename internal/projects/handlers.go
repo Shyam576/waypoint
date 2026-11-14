@@ -215,3 +215,57 @@ func (h *Handlers) ListMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, list)
 }
+
+func (h *Handlers) ListRiskPolicies(w http.ResponseWriter, r *http.Request) {
+	identity, ok := mustIdentity(w, r)
+	if !ok {
+		return
+	}
+	id, err := parseUUIDParam(r, "projectID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	list, err := h.Svc.ListRiskPolicies(r.Context(), identity, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, list)
+}
+
+type updateRiskPolicyRequest struct {
+	RiskLevel                   string   `json:"risk_level"`
+	ExtraRequiredApprovalsCount int      `json:"extra_required_approvals_count"`
+	ExtraRequiredEvidenceTypes  []string `json:"extra_required_evidence_types"`
+	RequireRiskAcceptance       bool     `json:"require_risk_acceptance"`
+}
+
+// UpdateRiskPolicy handles PATCH /api/v1/projects/{projectID}/risk-policy.
+// The target tier is named in the request body (risk_level), not the
+// URL, since a project may have several (one per tier).
+func (h *Handlers) UpdateRiskPolicy(w http.ResponseWriter, r *http.Request) {
+	identity, ok := mustIdentity(w, r)
+	if !ok {
+		return
+	}
+	id, err := parseUUIDParam(r, "projectID")
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	var req updateRiskPolicyRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	p, err := h.Svc.UpdateRiskPolicy(r.Context(), identity, id, UpdateRiskPolicyInput{
+		RiskLevel: req.RiskLevel, ExtraRequiredApprovalsCount: req.ExtraRequiredApprovalsCount,
+		ExtraRequiredEvidenceTypes: req.ExtraRequiredEvidenceTypes, RequireRiskAcceptance: req.RequireRiskAcceptance,
+	})
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, p)
+}

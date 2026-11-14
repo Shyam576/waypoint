@@ -26,15 +26,27 @@ type Project struct {
 }
 
 // EvidenceType mirrors the fixed vocabulary enforced on the evidence
-// table's CHECK constraint (see internal/evidence and migrations/0004).
-// Policy.RequiredEvidenceTypes must only contain these values.
+// table's CHECK constraint (see internal/evidence and
+// migrations/0004 + 0013). Policy.RequiredEvidenceTypes and
+// RiskPolicy.ExtraRequiredEvidenceTypes must only contain these values.
 var ValidEvidenceTypes = map[string]bool{
-	"change_summary":  true,
-	"test_results":    true,
-	"uat_signoff":     true,
-	"rollback_plan":   true,
-	"security_review": true,
-	"other":           true,
+	"change_summary":       true,
+	"test_results":         true,
+	"uat_signoff":          true,
+	"rollback_plan":        true,
+	"security_review":      true,
+	"config_comparison":    true,
+	"smoke_test_results":   true,
+	"payment_config_check": true,
+	"other":                true,
+}
+
+// ValidRiskLevels mirrors internal/releases.RiskLevel's vocabulary. Kept
+// as a plain map here (rather than importing internal/releases) to
+// match how the rest of this file already treats evidence types: a
+// local copy of a small, stable, shared vocabulary.
+var ValidRiskLevels = map[string]bool{
+	"low": true, "medium": true, "high": true, "critical": true,
 }
 
 type Policy struct {
@@ -45,6 +57,23 @@ type Policy struct {
 	BlockOnOpenRejection        bool       `json:"block_on_open_rejection"`
 	RequireCandidateForApproval bool       `json:"require_candidate_for_approval"`
 	RequireChecklistCompletion  bool       `json:"require_checklist_completion"`
+	UpdatedBy                   *uuid.UUID `json:"updated_by,omitempty"`
+	UpdatedAt                   time.Time  `json:"updated_at"`
+}
+
+// RiskPolicy is the extra requirements a project layers on top of its
+// base Policy for releases at one specific risk tier. Only 'high' and
+// 'critical' get a seeded default on project creation (see
+// internal/checklists-style seeding in Service.Create); 'low'/'medium'
+// having no row (or a project having none at all) means no extra
+// requirements for that tier. See docs/architecture-audit.md Finding 4.
+type RiskPolicy struct {
+	ID                          uuid.UUID  `json:"id"`
+	ProjectID                   uuid.UUID  `json:"project_id"`
+	RiskLevel                   string     `json:"risk_level"`
+	ExtraRequiredApprovalsCount int        `json:"extra_required_approvals_count"`
+	ExtraRequiredEvidenceTypes  []string   `json:"extra_required_evidence_types"`
+	RequireRiskAcceptance       bool       `json:"require_risk_acceptance"`
 	UpdatedBy                   *uuid.UUID `json:"updated_by,omitempty"`
 	UpdatedAt                   time.Time  `json:"updated_at"`
 }
