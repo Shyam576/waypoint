@@ -1679,3 +1679,156 @@ func TestEmergencyReleaseCannotCloseWithoutRetrospective(t *testing.T) {
 		t.Fatalf("expected close to succeed after retrospective completed: %v", err)
 	}
 }
+
+func TestDeploymentVerificationFromCIAndWeb(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	ci, d := h.satisfyGateAndDeployProduction(t, ctx, admin, dev, approver, proj, rel, "sha256:v1")
+
+	if d.VerificationStatus != deployments.VerificationPending {
+		t.Fatalf("expected a freshly recorded deployment to start verification_status=pending, got %s", d.VerificationStatus)
+	}
+
+	updated, err := h.deploymentsSvc.SubmitVerificationFromCI(ctx, ci, rel.ID, d.ID, deployments.SubmitVerificationInput{
+		Status: deployments.VerificationPassed, Note: "smoke tests green",
+	})
+	if err != nil {
+		t.Fatalf("submit verification from ci: %v", err)
+	}
+	if updated.VerificationStatus != deployments.VerificationPassed {
+		t.Errorf("expected verification_status=passed, got %s", updated.VerificationStatus)
+	}
+	if updated.VerifiedVia == nil || *updated.VerifiedVia != deployments.VerifiedViaCI {
+		t.Error("expected verified_via=ci")
+	}
+	if updated.VerifiedBy != nil {
+		t.Error("expected verified_by to be nil for a ci-reported verification")
+	}
+
+	// A human can later override an automated result, e.g. after
+	// noticing something the CI check missed.
+	updated, err = h.deploymentsSvc.SubmitVerificationFromWeb(ctx, dev, rel.ID, d.ID, deployments.SubmitVerificationInput{
+		Status: deployments.VerificationFailed, Note: "actually seeing elevated error rates",
+	})
+	if err != nil {
+		t.Fatalf("submit verification from web: %v", err)
+	}
+	if updated.VerificationStatus != deployments.VerificationFailed {
+		t.Errorf("expected verification_status=failed after override, got %s", updated.VerificationStatus)
+	}
+	if updated.VerifiedVia == nil || *updated.VerifiedVia != deployments.VerifiedViaWeb {
+		t.Error("expected verified_via=web")
+	}
+	if updated.VerifiedBy == nil || *updated.VerifiedBy != dev.User.ID {
+		t.Error("expected verified_by to record the verifying user")
+	}
+}
+
+func TestDeploymentVerificationRequiresSuccessfulResult(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	proj := h.createProject(t, ctx, admin, dev)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+
+	failed, err := h.deploymentsSvc.RecordFromWeb(ctx, admin, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvDevelopment, ArtifactDigest: "sha256:bad", WorkflowRunURL: "https://ci.example/run",
+		Result: deployments.ResultFailure,
+	})
+	if err != nil {
+		t.Fatalf("record failed deployment: %v", err)
+	}
+
+	if _, err := h.deploymentsSvc.SubmitVerificationFromWeb(ctx, dev, rel.ID, failed.ID, deployments.SubmitVerificationInput{
+		Status: deployments.VerificationPassed, Note: "n/a",
+	}); err == nil {
+		t.Error("expected verifying a deployment whose own result was failure to be rejected")
+	}
+}
+
+func TestDeploymentVerificationFromWebRequiresEditPermission(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+
+	d, err := h.deploymentsSvc.RecordFromWeb(ctx, admin, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvDevelopment, ArtifactDigest: "sha256:v1", WorkflowRunURL: "https://ci.example/run",
+		Result: deployments.ResultSuccess,
+	})
+	if err != nil {
+		t.Fatalf("record deployment: %v", err)
+	}
+
+	if _, err := h.deploymentsSvc.SubmitVerificationFromWeb(ctx, approver, rel.ID, d.ID, deployments.SubmitVerificationInput{
+		Status: deployments.VerificationPassed, Note: "looks fine",
+	}); err == nil {
+		t.Error("expected an approver (not developer/coordinator/admin) to be forbidden from submitting a verification")
+	}
+
+	if _, err := h.deploymentsSvc.SubmitVerificationFromWeb(ctx, dev, rel.ID, d.ID, deployments.SubmitVerificationInput{
+		Status: deployments.VerificationPassed, Note: "looks fine",
+	}); err != nil {
+		t.Errorf("expected a developer who is a project member to be allowed: %v", err)
+	}
+}
+
+func TestDeploymentVerificationValidatesInput(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	proj := h.createProject(t, ctx, admin, dev)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+
+	d, err := h.deploymentsSvc.RecordFromWeb(ctx, admin, rel.ID, deployments.RecordInput{
+		Environment: deployments.EnvDevelopment, ArtifactDigest: "sha256:v1", WorkflowRunURL: "https://ci.example/run",
+		Result: deployments.ResultSuccess,
+	})
+	if err != nil {
+		t.Fatalf("record deployment: %v", err)
+	}
+
+	if _, err := h.deploymentsSvc.SubmitVerificationFromWeb(ctx, dev, rel.ID, d.ID, deployments.SubmitVerificationInput{
+		Status: deployments.VerificationPending, Note: "n/a",
+	}); err == nil {
+		t.Error("expected submitting verification_status=pending to be rejected; pending is only the implicit default")
+	}
+	if _, err := h.deploymentsSvc.SubmitVerificationFromWeb(ctx, dev, rel.ID, d.ID, deployments.SubmitVerificationInput{
+		Status: deployments.VerificationPassed, Note: "",
+	}); err == nil {
+		t.Error("expected an empty verification note to be rejected")
+	}
+}
+
+func TestDeploymentVerificationFromCIScopedToOwnProject(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	_, d := h.satisfyGateAndDeployProduction(t, ctx, admin, dev, approver, proj, rel, "sha256:v1")
+
+	otherAdmin := h.createUser(t, ctx, users.RoleAdmin)
+	otherProj := h.createProject(t, ctx, otherAdmin)
+	wrongScopeCI := h.issueCIIdentity(t, ctx, otherAdmin, otherProj.ID)
+
+	if _, err := h.deploymentsSvc.SubmitVerificationFromCI(ctx, wrongScopeCI, rel.ID, d.ID, deployments.SubmitVerificationInput{
+		Status: deployments.VerificationPassed, Note: "n/a",
+	}); err == nil {
+		t.Error("expected a ci token scoped to a different project to be rejected")
+	}
+}
