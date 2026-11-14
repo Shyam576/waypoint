@@ -251,6 +251,21 @@ project (`GET`/`PATCH /api/v1/projects/{id}/policy`); a sensible default
 is seeded when a project is created (`change_summary`, `test_results`,
 `uat_signoff`, `rollback_plan`; 1 required approval).
 
+**"The project's policy" means a frozen snapshot once a release has
+reached `ready_for_production`, not whatever the policy currently says.**
+Every time a release enters `ready_for_production` (including a later
+re-entry, e.g. after being sent back to `uat` for a fix), the project's
+current policy is captured onto that release
+(`release_policy_snapshots`), and `gate.Evaluate` reads that snapshot
+from then on — `GET .../eligibility`'s `policy_snapshot_at` field is set
+once this has happened. Editing the project's policy afterward (e.g.
+lowering the required approval count) has no effect on a release that
+already has a snapshot; it only affects releases that haven't reached
+`ready_for_production` yet. This closes
+[`docs/architecture-audit.md`](docs/architecture-audit.md) Finding 3 —
+previously, a policy edit could silently change the requirements an
+in-progress release was being held to.
+
 Eligibility alone is **not** what gates a CI-recorded production
 deployment — see the next section.
 

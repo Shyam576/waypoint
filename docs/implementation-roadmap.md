@@ -63,15 +63,18 @@ for the full behavior and `docs/architecture-audit.md` Finding 2 for why
 evidence binding remains open (folded into item 4, the checklist
 engine).
 
-**3. Policy snapshotting per release (closes Finding 3).**
-Complexity: S. Depends on: nothing, but touches the same `gate.Evaluate`
-code item 2 touches — do them in the same pass to avoid two migrations to
-the same read path.
-Snapshot the effective policy onto a release when it enters
-`ready_for_production` (or at creation — needs a decision, see Open
-Questions). `gate.Evaluate` reads the snapshot, not the live project
-policy, for any release that has one. Project policy edits remain
-unrestricted for releases that haven't reached that stage yet.
+**3. Policy snapshotting per release (closes Finding 3). — DONE.**
+Implemented: migration `0011_release_policy_snapshots.sql`,
+`releases.Service.Transition` snapshots the project's current policy
+onto the release every time it enters `ready_for_production` (including
+a later re-entry, e.g. after being sent back to `uat` for fixes —
+deliberately refreshed as part of that audited transition, not silently).
+`gate.Evaluate` prefers this snapshot over the live project policy
+whenever one exists (`Result.PolicySnapshotAt` is non-nil when it does);
+a release that has never reached `ready_for_production` is unaffected
+and still reads the live policy, exactly as the Open Question below
+recommended. `UpdatePolicy` itself was left completely unrestricted —
+the fix is entirely on the read side.
 
 **4. Structured checklist / evidence engine (closes Finding 5).**
 Complexity: L. Depends on: item 3 (checklist version should be snapshotted
@@ -178,15 +181,11 @@ docker run -d --name waypoint-test-db -e POSTGRES_USER=waypoint \
 WAYPOINT_TEST_DATABASE_URL="postgres://waypoint:waypoint@localhost:15432/waypoint_test?sslmode=disable" go test ./...
 ```
 
-## Open questions (need a decision before item 3, not before item 1)
+## Open questions (need a decision before item 7)
 
-- Should policy snapshot onto a release at *creation* or at the moment it
-  enters `ready_for_production`? Creation is simpler and more predictable;
-  entering `ready_for_production` lets a long-lived release pick up
-  intentional policy improvements made while it was still in development.
-  Recommend: snapshot at `ready_for_production` entry, since that is the
-  point the brief and the current gate both treat as "now this release is
-  subject to the production policy."
+- Item 3's snapshot-timing question (creation vs. `ready_for_production`
+  entry) is resolved — see item 3 above: snapshot (and re-snapshot) on
+  entry to `ready_for_production`.
 - Should an "emergency release" reduced-approval policy be allowed to go
   as low as zero required approvals, or should the system enforce a floor
   (e.g. always at least one approval, even under emergency policy)?
