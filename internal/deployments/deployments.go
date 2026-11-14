@@ -264,15 +264,6 @@ func requireAuthorization(via RecordedVia, env Environment) bool {
 }
 
 func (s *Service) record(ctx context.Context, identity authn.Identity, rel releases.Release, in RecordInput, via RecordedVia, recordedBy, ciTokenID *uuid.UUID) (Deployment, error) {
-	if in.Environment == EnvProduction {
-		result, err := s.gate.Evaluate(ctx, rel.ID)
-		if err != nil {
-			return Deployment{}, err
-		}
-		if !result.Eligible {
-			return Deployment{}, httpx.Conflict("release is not eligible for production deployment").WithDetails(result)
-		}
-	}
 	if requireAuthorization(via, in.Environment) && in.DeploymentAuthorization == "" {
 		return Deployment{}, httpx.BadRequest("deployment_authorization_token is required for a CI-recorded production deployment; obtain one from POST .../deployment-authorizations first")
 	}
@@ -285,6 +276,25 @@ func (s *Service) record(ctx context.Context, identity authn.Identity, rel relea
 		return Deployment{}, err
 	}
 	defer tx.Rollback(ctx)
+
+	// The gate re-check happens inside this transaction, after taking a
+	// row lock on the release, so a concurrent approval/policy change
+	// cannot land in the gap between "the gate said eligible" and "the
+	// deployment got recorded" — see docs/architecture-audit.md Finding
+	// 11. A failed check here still just returns; the deferred
+	// rollback above discards the lock and anything else done so far.
+	if in.Environment == EnvProduction {
+		if err := s.releases.LockForUpdate(ctx, tx, rel.ID); err != nil {
+			return Deployment{}, err
+		}
+		result, err := s.gate.EvaluateTx(ctx, tx, rel.ID)
+		if err != nil {
+			return Deployment{}, err
+		}
+		if !result.Eligible {
+			return Deployment{}, httpx.Conflict("release is not eligible for production deployment").WithDetails(result)
+		}
+	}
 
 	var authorizationID *uuid.UUID
 	if requireAuthorization(via, in.Environment) {

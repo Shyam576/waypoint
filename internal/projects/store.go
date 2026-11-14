@@ -82,36 +82,47 @@ func (s *Store) Update(ctx context.Context, q dbx.Querier, id uuid.UUID, name, o
 	return out, err
 }
 
-func (s *Store) CreatePolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID) (Policy, error) {
+const policyColumns = `id, project_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, require_checklist_completion, require_approver_not_submitter, updated_by, updated_at`
+
+func scanPolicy(row pgx.Row) (Policy, error) {
 	var p Policy
-	err := q.QueryRow(ctx, `
-		INSERT INTO project_policies (project_id)
-		VALUES ($1)
-		RETURNING id, project_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, require_checklist_completion, updated_by, updated_at`,
-		projectID,
-	).Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.RequireChecklistCompletion, &p.UpdatedBy, &p.UpdatedAt)
+	err := row.Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection,
+		&p.RequireCandidateForApproval, &p.RequireChecklistCompletion, &p.RequireApproverNotSubmitter, &p.UpdatedBy, &p.UpdatedAt)
 	return p, err
+}
+
+func (s *Store) CreatePolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID) (Policy, error) {
+	row := q.QueryRow(ctx, `INSERT INTO project_policies (project_id) VALUES ($1) RETURNING `+policyColumns, projectID)
+	return scanPolicy(row)
 }
 
 func (s *Store) GetPolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID) (Policy, error) {
-	var p Policy
-	err := q.QueryRow(ctx, `
-		SELECT id, project_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, require_checklist_completion, updated_by, updated_at
-		FROM project_policies WHERE project_id = $1`, projectID,
-	).Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.RequireChecklistCompletion, &p.UpdatedBy, &p.UpdatedAt)
-	return p, err
+	row := q.QueryRow(ctx, `SELECT `+policyColumns+` FROM project_policies WHERE project_id = $1`, projectID)
+	return scanPolicy(row)
 }
 
-func (s *Store) UpdatePolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID, requiredEvidenceTypes []string, requiredApprovalsCount int, blockOnOpenRejection, requireCandidateForApproval, requireChecklistCompletion bool, updatedBy uuid.UUID) (Policy, error) {
-	var p Policy
-	err := q.QueryRow(ctx, `
+type UpdatePolicyParams struct {
+	RequiredEvidenceTypes       []string
+	RequiredApprovalsCount      int
+	BlockOnOpenRejection        bool
+	RequireCandidateForApproval bool
+	RequireChecklistCompletion  bool
+	RequireApproverNotSubmitter bool
+	UpdatedBy                   uuid.UUID
+}
+
+func (s *Store) UpdatePolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID, p UpdatePolicyParams) (Policy, error) {
+	row := q.QueryRow(ctx, `
 		UPDATE project_policies
-		SET required_evidence_types = $2, required_approvals_count = $3, block_on_open_rejection = $4, require_candidate_for_approval = $5, require_checklist_completion = $6, updated_by = $7, updated_at = now()
+		SET required_evidence_types = $2, required_approvals_count = $3, block_on_open_rejection = $4,
+		    require_candidate_for_approval = $5, require_checklist_completion = $6, require_approver_not_submitter = $7,
+		    updated_by = $8, updated_at = now()
 		WHERE project_id = $1
-		RETURNING id, project_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, require_checklist_completion, updated_by, updated_at`,
-		projectID, requiredEvidenceTypes, requiredApprovalsCount, blockOnOpenRejection, requireCandidateForApproval, requireChecklistCompletion, updatedBy,
-	).Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.RequireChecklistCompletion, &p.UpdatedBy, &p.UpdatedAt)
-	return p, err
+		RETURNING `+policyColumns,
+		projectID, p.RequiredEvidenceTypes, p.RequiredApprovalsCount, p.BlockOnOpenRejection,
+		p.RequireCandidateForApproval, p.RequireChecklistCompletion, p.RequireApproverNotSubmitter, p.UpdatedBy,
+	)
+	return scanPolicy(row)
 }
 
 const riskPolicyColumns = `id, project_id, risk_level, extra_required_approvals_count, extra_required_evidence_types, require_risk_acceptance, updated_by, updated_at`

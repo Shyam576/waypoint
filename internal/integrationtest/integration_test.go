@@ -76,7 +76,7 @@ func newHarness(pool *pgxpool.Pool) *harness {
 	auditStore := audit.NewStore()
 	usersStore := users.NewStore()
 	authStore := authn.NewStore(pool)
-	authSvc := authn.NewService(authStore, usersStore, pool, time.Hour)
+	authSvc := authn.NewService(authStore, usersStore, pool, time.Hour, 180*24*time.Hour, 90*24*time.Hour)
 	checklistsStore := checklists.NewStore()
 	projectsStore := projects.NewStore()
 	projectsSvc := projects.NewService(pool, projectsStore, auditStore, usersStore, checklistsStore)
@@ -88,7 +88,7 @@ func newHarness(pool *pgxpool.Pool) *harness {
 	candidatesStore := candidates.NewStore()
 	candidatesSvc := candidates.NewService(pool, candidatesStore, auditStore, releasesStore, releasesSvc)
 	approvalsStore := approvals.NewStore()
-	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc, candidatesStore)
+	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc, candidatesStore, evidenceStore)
 	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore, candidatesStore, checklistsStore)
 	deploymentsStore := deployments.NewStore()
 	deploymentsSvc := deployments.NewService(pool, deploymentsStore, auditStore, gateSvc, releasesStore, releasesSvc, releasesSvc, projectsSvc, candidatesStore, 15*time.Minute)
@@ -1166,5 +1166,150 @@ func TestGateRequiresRiskAcceptanceAndExtraEvidenceForCriticalRelease(t *testing
 	}
 	if !result.RiskAccepted {
 		t.Error("expected RiskAccepted to be true")
+	}
+}
+
+func TestMCPAndCITokensExpire(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	proj := h.createProject(t, ctx, admin)
+
+	// A harness-local auth service with a near-zero token TTL, so issued
+	// tokens are already expired by the time we try to use them, without
+	// sleeping for a realistic TTL (same technique as
+	// TestDeploymentAuthorizationExpires).
+	shortTTLAuth := authn.NewService(authn.NewStore(pool), h.usersStore, pool, time.Hour, time.Nanosecond, time.Nanosecond)
+
+	_, mcpToken, err := shortTTLAuth.IssueMCPToken(ctx, admin.User.ID, "test")
+	if err != nil {
+		t.Fatalf("issue mcp token: %v", err)
+	}
+	_, ciToken, err := shortTTLAuth.IssueCIToken(ctx, proj.ID, admin.User.ID, "test")
+	if err != nil {
+		t.Fatalf("issue ci token: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	if _, err := shortTTLAuth.ResolveMCPToken(ctx, mcpToken); err == nil {
+		t.Error("expected an expired mcp token to be rejected")
+	}
+	if _, err := shortTTLAuth.ResolveCIToken(ctx, ciToken); err == nil {
+		t.Error("expected an expired ci token to be rejected")
+	}
+
+	// A token issued with the harness's normal (long) TTL still works.
+	_, longMCPToken, err := h.authSvc.IssueMCPToken(ctx, admin.User.ID, "test-long")
+	if err != nil {
+		t.Fatalf("issue long-lived mcp token: %v", err)
+	}
+	if _, err := h.authSvc.ResolveMCPToken(ctx, longMCPToken); err != nil {
+		t.Errorf("expected a freshly issued, long-TTL mcp token to resolve: %v", err)
+	}
+}
+
+func TestChangePasswordRequiresCurrentPasswordAndInvalidatesSessions(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	email := fmt.Sprintf("changepw-%d@test.local", time.Now().UnixNano())
+	hash, err := authn.HashPassword("originalpass123")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	u, err := h.usersStore.Create(ctx, h.pool, email, "Change PW", hash, users.RoleDeveloper)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	_, sessionToken, err := h.authSvc.Login(ctx, email, "originalpass123", "test-agent")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if _, err := h.authSvc.ResolveSession(ctx, sessionToken); err != nil {
+		t.Fatalf("expected the fresh session to resolve: %v", err)
+	}
+
+	if err := h.authSvc.ChangePassword(ctx, u.ID, "wrongpassword", "newpass456"); err == nil {
+		t.Error("expected changing password with the wrong current password to fail")
+	}
+	if err := h.authSvc.ChangePassword(ctx, u.ID, "originalpass123", "newpass456"); err != nil {
+		t.Fatalf("change password: %v", err)
+	}
+
+	if _, err := h.authSvc.ResolveSession(ctx, sessionToken); err == nil {
+		t.Error("expected the old session to be invalidated after a password change")
+	}
+	if _, _, err := h.authSvc.Login(ctx, email, "newpass456", "test-agent"); err != nil {
+		t.Errorf("expected login with the new password to succeed: %v", err)
+	}
+}
+
+func TestAdminSetPasswordAndDeactivateUser(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	email := fmt.Sprintf("admin-managed-%d@test.local", time.Now().UnixNano())
+	hash, err := authn.HashPassword("originalpass123")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	u, err := h.usersStore.Create(ctx, h.pool, email, "Admin Managed", hash, users.RoleDeveloper)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	if err := h.authSvc.AdminSetPassword(ctx, u.ID, "adminsetpass789"); err != nil {
+		t.Fatalf("admin set password: %v", err)
+	}
+	if _, _, err := h.authSvc.Login(ctx, email, "adminsetpass789", "test-agent"); err != nil {
+		t.Errorf("expected login with the admin-set password to succeed: %v", err)
+	}
+
+	if _, err := h.usersStore.SetActive(ctx, h.pool, u.ID, false); err != nil {
+		t.Fatalf("deactivate user: %v", err)
+	}
+	if _, _, err := h.authSvc.Login(ctx, email, "adminsetpass789", "test-agent"); err == nil {
+		t.Error("expected login for a deactivated user to fail")
+	}
+
+	if _, err := h.usersStore.SetActive(ctx, h.pool, u.ID, true); err != nil {
+		t.Fatalf("reactivate user: %v", err)
+	}
+	if _, _, err := h.authSvc.Login(ctx, email, "adminsetpass789", "test-agent"); err != nil {
+		t.Errorf("expected login for a reactivated user to succeed: %v", err)
+	}
+}
+
+func TestApproverNotSubmitterSeparationOfDuties(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approverWhoSubmitted := h.createUser(t, ctx, users.RoleApprover)
+	otherApprover := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approverWhoSubmitted, otherApprover)
+
+	policy, err := h.projectsSvc.GetPolicy(ctx, admin, proj.ID)
+	if err != nil {
+		t.Fatalf("get policy: %v", err)
+	}
+	if _, err := h.projectsSvc.UpdatePolicy(ctx, admin, proj.ID, projects.UpdatePolicyInput{
+		RequiredEvidenceTypes: policy.RequiredEvidenceTypes, RequiredApprovalsCount: policy.RequiredApprovalsCount,
+		BlockOnOpenRejection: policy.BlockOnOpenRejection, RequireApproverNotSubmitter: true,
+	}); err != nil {
+		t.Fatalf("enable require_approver_not_submitter: %v", err)
+	}
+
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+
+	if _, err := h.evidenceSvc.Submit(ctx, approverWhoSubmitted, rel.ID, evidence.TypeTestResults, "tests", "ok", nil); err != nil {
+		t.Fatalf("submit evidence: %v", err)
+	}
+
+	if _, err := h.approvalsSvc.Decide(ctx, approverWhoSubmitted, rel.ID, approvals.DecisionApproved, "self-submitted"); err == nil {
+		t.Error("expected an approver who submitted evidence for this release to be forbidden from approving it")
+	}
+	if _, err := h.approvalsSvc.Decide(ctx, otherApprover, rel.ID, approvals.DecisionApproved, "did not submit evidence"); err != nil {
+		t.Errorf("expected an approver who did not submit evidence to be allowed to approve: %v", err)
 	}
 }

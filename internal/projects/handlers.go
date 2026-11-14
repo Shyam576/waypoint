@@ -143,6 +143,7 @@ type updatePolicyRequest struct {
 	BlockOnOpenRejection        bool     `json:"block_on_open_rejection"`
 	RequireCandidateForApproval bool     `json:"require_candidate_for_approval"`
 	RequireChecklistCompletion  bool     `json:"require_checklist_completion"`
+	RequireApproverNotSubmitter bool     `json:"require_approver_not_submitter"`
 }
 
 func (h *Handlers) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
@@ -163,7 +164,7 @@ func (h *Handlers) UpdatePolicy(w http.ResponseWriter, r *http.Request) {
 	p, err := h.Svc.UpdatePolicy(r.Context(), identity, id, UpdatePolicyInput{
 		RequiredEvidenceTypes: req.RequiredEvidenceTypes, RequiredApprovalsCount: req.RequiredApprovalsCount,
 		BlockOnOpenRejection: req.BlockOnOpenRejection, RequireCandidateForApproval: req.RequireCandidateForApproval,
-		RequireChecklistCompletion: req.RequireChecklistCompletion,
+		RequireChecklistCompletion: req.RequireChecklistCompletion, RequireApproverNotSubmitter: req.RequireApproverNotSubmitter,
 	})
 	if err != nil {
 		httpx.Error(w, r, err)

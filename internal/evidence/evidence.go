@@ -117,6 +117,15 @@ func (s *Store) PresentTypes(ctx context.Context, q dbx.Querier, releaseID uuid.
 	return out, rows.Err()
 }
 
+// SubmittedByUser reports whether this user has submitted any evidence
+// for this release, for internal/approvals' optional
+// separation-of-duties check (docs/architecture-audit.md Finding 9).
+func (s *Store) SubmittedByUser(ctx context.Context, q dbx.Querier, releaseID, userID uuid.UUID) (bool, error) {
+	var exists bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM evidence WHERE release_id = $1 AND submitted_by = $2)`, releaseID, userID).Scan(&exists)
+	return exists, err
+}
+
 // ReleaseAccess is the narrow slice of the releases package's Service
 // that evidence needs: fetching a release while enforcing project
 // visibility.

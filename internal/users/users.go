@@ -102,3 +102,23 @@ func (s *Store) Count(ctx context.Context, q dbx.Querier) (int, error) {
 	err := q.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&n)
 	return n, err
 }
+
+func (s *Store) UpdatePassword(ctx context.Context, q dbx.Querier, id uuid.UUID, passwordHash string) error {
+	_, err := q.Exec(ctx, `UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1`, id, passwordHash)
+	return err
+}
+
+// SetActive flips a user's is_active flag. Session and MCP/CI token
+// resolution already check IsActive on every request, so deactivating a
+// user takes effect immediately — no separate session-revocation step
+// is needed the way it is for a password change. See
+// docs/architecture-audit.md Finding 10.
+func (s *Store) SetActive(ctx context.Context, q dbx.Querier, id uuid.UUID, active bool) (User, error) {
+	var u User
+	err := q.QueryRow(ctx, `
+		UPDATE users SET is_active = $2, updated_at = now() WHERE id = $1
+		RETURNING id, email, name, password_hash, role, is_active, created_at, updated_at`,
+		id, active,
+	).Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+	return u, err
+}

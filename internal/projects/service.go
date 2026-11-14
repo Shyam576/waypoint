@@ -215,6 +215,7 @@ type UpdatePolicyInput struct {
 	BlockOnOpenRejection        bool
 	RequireCandidateForApproval bool
 	RequireChecklistCompletion  bool
+	RequireApproverNotSubmitter bool
 }
 
 func (s *Service) UpdatePolicy(ctx context.Context, identity authn.Identity, projectID uuid.UUID, in UpdatePolicyInput) (Policy, error) {
@@ -245,7 +246,12 @@ func (s *Service) UpdatePolicy(ctx context.Context, identity authn.Identity, pro
 	}
 	defer tx.Rollback(ctx)
 
-	after, err := s.store.UpdatePolicy(ctx, tx, projectID, in.RequiredEvidenceTypes, in.RequiredApprovalsCount, in.BlockOnOpenRejection, in.RequireCandidateForApproval, in.RequireChecklistCompletion, identity.User.ID)
+	after, err := s.store.UpdatePolicy(ctx, tx, projectID, UpdatePolicyParams{
+		RequiredEvidenceTypes: in.RequiredEvidenceTypes, RequiredApprovalsCount: in.RequiredApprovalsCount,
+		BlockOnOpenRejection: in.BlockOnOpenRejection, RequireCandidateForApproval: in.RequireCandidateForApproval,
+		RequireChecklistCompletion: in.RequireChecklistCompletion, RequireApproverNotSubmitter: in.RequireApproverNotSubmitter,
+		UpdatedBy: identity.User.ID,
+	})
 	if err != nil {
 		return Policy{}, err
 	}
@@ -331,6 +337,21 @@ func (s *Service) CurrentPolicy(ctx context.Context, projectID uuid.UUID) ([]str
 		return nil, 0, false, false, false, err
 	}
 	return p.RequiredEvidenceTypes, p.RequiredApprovalsCount, p.BlockOnOpenRejection, p.RequireCandidateForApproval, p.RequireChecklistCompletion, nil
+}
+
+// RequireApproverNotSubmitter reports whether this project's live policy
+// currently requires the separation-of-duties rule internal/approvals
+// enforces at decision time (not frozen into the policy snapshot: this
+// is an authorization check on the approver, evaluated live, the same
+// way the "not the release owner" rule already is — not a gate
+// eligibility requirement that needs to stay stable over the release's
+// lifetime). See docs/architecture-audit.md Finding 9.
+func (s *Service) RequireApproverNotSubmitter(ctx context.Context, projectID uuid.UUID) (bool, error) {
+	p, err := s.store.GetPolicy(ctx, s.pool, projectID)
+	if err != nil {
+		return false, err
+	}
+	return p.RequireApproverNotSubmitter, nil
 }
 
 // RiskPolicyFor returns the extra requirements this project defines for

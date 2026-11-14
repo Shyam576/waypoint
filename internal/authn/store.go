@@ -42,29 +42,42 @@ func (s *Store) DeleteSessionByTokenHash(ctx context.Context, tokenHash string) 
 	return err
 }
 
+// DeleteAllSessionsForUser is called after a password change: if the old
+// password was compromised, leaving other existing sessions alive would
+// defeat the point of changing it.
+func (s *Store) DeleteAllSessionsForUser(ctx context.Context, userID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM sessions WHERE user_id = $1`, userID)
+	return err
+}
+
 type MCPToken struct {
 	ID         uuid.UUID  `json:"id"`
 	UserID     uuid.UUID  `json:"user_id"`
 	Label      string     `json:"label"`
 	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 }
 
-func (s *Store) CreateMCPToken(ctx context.Context, userID uuid.UUID, label, tokenHash string) (MCPToken, error) {
+// CreateMCPToken stores a new token. expiresAt may be nil for "never
+// expires" (not used for newly issued tokens — see
+// internal/config.Config.MCPTokenTTL — but supported so a pre-existing
+// caller or test can opt out).
+func (s *Store) CreateMCPToken(ctx context.Context, userID uuid.UUID, label, tokenHash string, expiresAt *time.Time) (MCPToken, error) {
 	var t MCPToken
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO mcp_tokens (user_id, label, token_hash)
-		VALUES ($1, $2, $3)
-		RETURNING id, user_id, label, created_at, last_used_at, revoked_at`,
-		userID, label, tokenHash,
-	).Scan(&t.ID, &t.UserID, &t.Label, &t.CreatedAt, &t.LastUsedAt, &t.RevokedAt)
+		INSERT INTO mcp_tokens (user_id, label, token_hash, expires_at)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, user_id, label, created_at, expires_at, last_used_at, revoked_at`,
+		userID, label, tokenHash, expiresAt,
+	).Scan(&t.ID, &t.UserID, &t.Label, &t.CreatedAt, &t.ExpiresAt, &t.LastUsedAt, &t.RevokedAt)
 	return t, err
 }
 
 func (s *Store) ListMCPTokens(ctx context.Context, userID uuid.UUID) ([]MCPToken, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, user_id, label, created_at, last_used_at, revoked_at
+		SELECT id, user_id, label, created_at, expires_at, last_used_at, revoked_at
 		FROM mcp_tokens WHERE user_id = $1 ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, err
@@ -73,7 +86,7 @@ func (s *Store) ListMCPTokens(ctx context.Context, userID uuid.UUID) ([]MCPToken
 	out := []MCPToken{}
 	for rows.Next() {
 		var t MCPToken
-		if err := rows.Scan(&t.ID, &t.UserID, &t.Label, &t.CreatedAt, &t.LastUsedAt, &t.RevokedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Label, &t.CreatedAt, &t.ExpiresAt, &t.LastUsedAt, &t.RevokedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -88,6 +101,7 @@ func (s *Store) RevokeMCPToken(ctx context.Context, id, userID uuid.UUID) error 
 
 type mcpTokenLookup struct {
 	UserID    uuid.UUID
+	ExpiresAt *time.Time
 	RevokedAt *time.Time
 }
 
@@ -95,8 +109,8 @@ func (s *Store) GetMCPTokenByHash(ctx context.Context, tokenHash string) (mcpTok
 	var row mcpTokenLookup
 	var id uuid.UUID
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, user_id, revoked_at FROM mcp_tokens WHERE token_hash = $1`, tokenHash,
-	).Scan(&id, &row.UserID, &row.RevokedAt)
+		SELECT id, user_id, expires_at, revoked_at FROM mcp_tokens WHERE token_hash = $1`, tokenHash,
+	).Scan(&id, &row.UserID, &row.ExpiresAt, &row.RevokedAt)
 	return row, id, err
 }
 
@@ -110,23 +124,24 @@ type CIToken struct {
 	ProjectID uuid.UUID  `json:"project_id"`
 	Label     string     `json:"label"`
 	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
 }
 
-func (s *Store) CreateCIToken(ctx context.Context, projectID, createdBy uuid.UUID, label, tokenHash string) (CIToken, error) {
+func (s *Store) CreateCIToken(ctx context.Context, projectID, createdBy uuid.UUID, label, tokenHash string, expiresAt *time.Time) (CIToken, error) {
 	var t CIToken
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO ci_tokens (project_id, label, token_hash, created_by)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, project_id, label, created_at, revoked_at`,
-		projectID, label, tokenHash, createdBy,
-	).Scan(&t.ID, &t.ProjectID, &t.Label, &t.CreatedAt, &t.RevokedAt)
+		INSERT INTO ci_tokens (project_id, label, token_hash, created_by, expires_at)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, project_id, label, created_at, expires_at, revoked_at`,
+		projectID, label, tokenHash, createdBy, expiresAt,
+	).Scan(&t.ID, &t.ProjectID, &t.Label, &t.CreatedAt, &t.ExpiresAt, &t.RevokedAt)
 	return t, err
 }
 
 func (s *Store) ListCITokens(ctx context.Context, projectID uuid.UUID) ([]CIToken, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, project_id, label, created_at, revoked_at
+		SELECT id, project_id, label, created_at, expires_at, revoked_at
 		FROM ci_tokens WHERE project_id = $1 ORDER BY created_at DESC`, projectID)
 	if err != nil {
 		return nil, err
@@ -135,7 +150,7 @@ func (s *Store) ListCITokens(ctx context.Context, projectID uuid.UUID) ([]CIToke
 	out := []CIToken{}
 	for rows.Next() {
 		var t CIToken
-		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Label, &t.CreatedAt, &t.RevokedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Label, &t.CreatedAt, &t.ExpiresAt, &t.RevokedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -150,6 +165,7 @@ func (s *Store) RevokeCIToken(ctx context.Context, id, projectID uuid.UUID) erro
 
 type ciTokenLookup struct {
 	ProjectID uuid.UUID
+	ExpiresAt *time.Time
 	RevokedAt *time.Time
 }
 
@@ -157,7 +173,7 @@ func (s *Store) GetCITokenByHash(ctx context.Context, tokenHash string) (ciToken
 	var row ciTokenLookup
 	var id uuid.UUID
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, project_id, revoked_at FROM ci_tokens WHERE token_hash = $1`, tokenHash,
-	).Scan(&id, &row.ProjectID, &row.RevokedAt)
+		SELECT id, project_id, expires_at, revoked_at FROM ci_tokens WHERE token_hash = $1`, tokenHash,
+	).Scan(&id, &row.ProjectID, &row.ExpiresAt, &row.RevokedAt)
 	return row, id, err
 }

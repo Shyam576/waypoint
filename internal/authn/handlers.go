@@ -1,6 +1,7 @@
 package authn
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"time"
 
@@ -87,6 +88,34 @@ func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, identity.User)
 }
 
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// ChangePassword is the self-service path (any signed-in user changing
+// their own password); it requires the current password. See
+// docs/architecture-audit.md Finding 10.
+func (h *Handlers) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	identity, ok := IdentityFromContext(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("sign in required"))
+		return
+	}
+	var req changePasswordRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	if err := h.Svc.ChangePassword(r.Context(), identity.User.ID, req.CurrentPassword, req.NewPassword); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	_ = h.Audit.Record(r.Context(), h.Pool, "user", identity.User.ID, "password_changed", identity.AuditActor(), nil, nil, "")
+	h.clearSessionCookie(w)
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "password changed; please sign in again"})
+}
+
 type bootstrapRequest struct {
 	Token    string `json:"token"`
 	Email    string `json:"email"`
@@ -110,7 +139,11 @@ func (h *Handlers) BootstrapAdmin(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
-	if req.Token != h.AdminBootstrapToken {
+	// Constant-time comparison: a plain != leaks timing information
+	// proportional to how many leading bytes match, a classical (if
+	// impractical over typical network jitter) side channel for a
+	// secret token. See docs/architecture-audit.md Finding 13.
+	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(h.AdminBootstrapToken)) != 1 {
 		httpx.Error(w, r, httpx.Forbidden("invalid bootstrap token"))
 		return
 	}

@@ -56,6 +56,17 @@ func (s *Store) GetByID(ctx context.Context, q dbx.Querier, id uuid.UUID) (Relea
 	return scanReleaseRow(row)
 }
 
+// LockForUpdate takes a row lock on the release, held until the calling
+// transaction commits or rolls back. Call it (passing an open tx) before
+// re-evaluating the gate as part of recording a deployment, so a
+// concurrent approval/policy change can't land in the gap between
+// "the gate said eligible" and "the deployment got recorded". See
+// docs/architecture-audit.md Finding 11.
+func (s *Store) LockForUpdate(ctx context.Context, q dbx.Querier, id uuid.UUID) error {
+	var discard uuid.UUID
+	return q.QueryRow(ctx, `SELECT id FROM releases WHERE id = $1 FOR UPDATE`, id).Scan(&discard)
+}
+
 func (s *Store) ListByProject(ctx context.Context, q dbx.Querier, projectID uuid.UUID, stage *Stage) ([]Release, error) {
 	var rows pgx.Rows
 	var err error

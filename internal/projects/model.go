@@ -50,13 +50,20 @@ var ValidRiskLevels = map[string]bool{
 }
 
 type Policy struct {
-	ID                          uuid.UUID  `json:"id"`
-	ProjectID                   uuid.UUID  `json:"project_id"`
-	RequiredEvidenceTypes       []string   `json:"required_evidence_types"`
-	RequiredApprovalsCount      int        `json:"required_approvals_count"`
-	BlockOnOpenRejection        bool       `json:"block_on_open_rejection"`
-	RequireCandidateForApproval bool       `json:"require_candidate_for_approval"`
-	RequireChecklistCompletion  bool       `json:"require_checklist_completion"`
+	ID                          uuid.UUID `json:"id"`
+	ProjectID                   uuid.UUID `json:"project_id"`
+	RequiredEvidenceTypes       []string  `json:"required_evidence_types"`
+	RequiredApprovalsCount      int       `json:"required_approvals_count"`
+	BlockOnOpenRejection        bool      `json:"block_on_open_rejection"`
+	RequireCandidateForApproval bool      `json:"require_candidate_for_approval"`
+	RequireChecklistCompletion  bool      `json:"require_checklist_completion"`
+	// RequireApproverNotSubmitter is a configurable separation-of-duties
+	// rule beyond the always-on "not the release's own owner" check
+	// (internal/approvals): when set, an approver who submitted any
+	// evidence for a release cannot also approve it. Default false,
+	// same opt-in convention as the flags above. See
+	// docs/architecture-audit.md Finding 9.
+	RequireApproverNotSubmitter bool       `json:"require_approver_not_submitter"`
 	UpdatedBy                   *uuid.UUID `json:"updated_by,omitempty"`
 	UpdatedAt                   time.Time  `json:"updated_at"`
 }

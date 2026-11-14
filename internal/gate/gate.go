@@ -18,6 +18,7 @@ import (
 	"github.com/Shyam576/waypoint/internal/approvals"
 	"github.com/Shyam576/waypoint/internal/candidates"
 	"github.com/Shyam576/waypoint/internal/checklists"
+	"github.com/Shyam576/waypoint/internal/dbx"
 	"github.com/Shyam576/waypoint/internal/evidence"
 	"github.com/Shyam576/waypoint/internal/projects"
 	"github.com/Shyam576/waypoint/internal/releases"
@@ -87,12 +88,27 @@ type effectivePolicy struct {
 	RequireRiskAcceptance       bool
 }
 
+// Evaluate computes production eligibility for one release against the
+// pool, outside any caller transaction. See EvaluateTx for the
+// transaction-participating form.
 func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, error) {
-	rel, err := s.releases.GetByID(ctx, s.pool, releaseID)
+	return s.EvaluateTx(ctx, s.pool, releaseID)
+}
+
+// EvaluateTx is Evaluate, but running its reads against the given
+// querier instead of always using the pool directly. Passing an open
+// transaction that has already taken a row lock on the release (see
+// internal/releases.Store.LockForUpdate) is what closes the narrow race
+// between "the gate said eligible" and "the deployment got recorded":
+// internal/deployments.record locks the release row and calls this
+// inside the same transaction, so a concurrent approval change cannot
+// land in the gap. See docs/architecture-audit.md Finding 11.
+func (s *Service) EvaluateTx(ctx context.Context, q dbx.Querier, releaseID uuid.UUID) (Result, error) {
+	rel, err := s.releases.GetByID(ctx, q, releaseID)
 	if err != nil {
 		return Result{}, err
 	}
-	snapshot, err := s.releases.GetPolicySnapshot(ctx, s.pool, releaseID)
+	snapshot, err := s.releases.GetPolicySnapshot(ctx, q, releaseID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -108,7 +124,7 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		}
 		policySnapshotAt = &snapshot.SnapshottedAt
 	} else {
-		live, err := s.projects.GetPolicy(ctx, s.pool, rel.ProjectID)
+		live, err := s.projects.GetPolicy(ctx, q, rel.ProjectID)
 		if err != nil {
 			return Result{}, err
 		}
@@ -117,7 +133,7 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 			BlockOnOpenRejection: live.BlockOnOpenRejection, RequireCandidateForApproval: live.RequireCandidateForApproval,
 			RequireChecklistCompletion: live.RequireChecklistCompletion,
 		}
-		riskPolicy, err := s.projects.GetRiskPolicy(ctx, s.pool, rel.ProjectID, string(rel.RiskLevel))
+		riskPolicy, err := s.projects.GetRiskPolicy(ctx, q, rel.ProjectID, string(rel.RiskLevel))
 		if err != nil {
 			return Result{}, err
 		}
@@ -127,19 +143,19 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 			policy.RequireRiskAcceptance = riskPolicy.RequireRiskAcceptance
 		}
 	}
-	present, err := s.evidence.PresentTypes(ctx, s.pool, releaseID)
+	present, err := s.evidence.PresentTypes(ctx, q, releaseID)
 	if err != nil {
 		return Result{}, err
 	}
-	latest, err := s.approvals.LatestPerApprover(ctx, s.pool, releaseID)
+	latest, err := s.approvals.LatestPerApprover(ctx, q, releaseID)
 	if err != nil {
 		return Result{}, err
 	}
-	currentCandidate, err := s.candidates.GetCurrentByRelease(ctx, s.pool, releaseID)
+	currentCandidate, err := s.candidates.GetCurrentByRelease(ctx, q, releaseID)
 	if err != nil {
 		return Result{}, err
 	}
-	checklistItems, err := s.checklists.ListByRelease(ctx, s.pool, releaseID)
+	checklistItems, err := s.checklists.ListByRelease(ctx, q, releaseID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -252,7 +268,7 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 	// different acts.
 	riskAccepted := false
 	if policy.RequireRiskAcceptance {
-		acceptance, err := s.releases.GetRiskAcceptance(ctx, s.pool, releaseID)
+		acceptance, err := s.releases.GetRiskAcceptance(ctx, q, releaseID)
 		if err != nil {
 			return Result{}, err
 		}

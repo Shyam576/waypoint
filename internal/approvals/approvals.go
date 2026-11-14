@@ -16,6 +16,7 @@ import (
 	"github.com/Shyam576/waypoint/internal/authn"
 	"github.com/Shyam576/waypoint/internal/candidates"
 	"github.com/Shyam576/waypoint/internal/dbx"
+	"github.com/Shyam576/waypoint/internal/evidence"
 	"github.com/Shyam576/waypoint/internal/httpx"
 	"github.com/Shyam576/waypoint/internal/releases"
 	"github.com/Shyam576/waypoint/internal/users"
@@ -110,6 +111,11 @@ type ReleaseAccess interface {
 
 type ProjectAccess interface {
 	CanView(ctx context.Context, identity authn.Identity, projectID uuid.UUID) (bool, error)
+	// RequireApproverNotSubmitter reports whether this project's live
+	// policy requires the extra separation-of-duties rule below, beyond
+	// the always-on "not the release owner" check. See
+	// docs/architecture-audit.md Finding 9.
+	RequireApproverNotSubmitter(ctx context.Context, projectID uuid.UUID) (bool, error)
 }
 
 type Service struct {
@@ -119,10 +125,11 @@ type Service struct {
 	releases   ReleaseAccess
 	projects   ProjectAccess
 	candidates *candidates.Store
+	evidence   *evidence.Store
 }
 
-func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, releaseAccess ReleaseAccess, projectAccess ProjectAccess, candidatesStore *candidates.Store) *Service {
-	return &Service{pool: pool, store: store, audit: auditStore, releases: releaseAccess, projects: projectAccess, candidates: candidatesStore}
+func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, releaseAccess ReleaseAccess, projectAccess ProjectAccess, candidatesStore *candidates.Store, evidenceStore *evidence.Store) *Service {
+	return &Service{pool: pool, store: store, audit: auditStore, releases: releaseAccess, projects: projectAccess, candidates: candidatesStore, evidence: evidenceStore}
 }
 
 // Decide records one approve/reject decision. It enforces, on the
@@ -150,6 +157,24 @@ func (s *Service) Decide(ctx context.Context, identity authn.Identity, releaseID
 		}
 		if !isMember {
 			return Approval{}, httpx.Forbidden("you must be a member of this project to approve its releases")
+		}
+	}
+
+	// Configurable separation of duties, beyond the always-on "not the
+	// release owner" check above: a project may additionally require
+	// that an approver did not submit evidence for the release they're
+	// approving. See docs/architecture-audit.md Finding 9.
+	requireNotSubmitter, err := s.projects.RequireApproverNotSubmitter(ctx, rel.ProjectID)
+	if err != nil {
+		return Approval{}, err
+	}
+	if requireNotSubmitter {
+		submitted, err := s.evidence.SubmittedByUser(ctx, s.pool, releaseID, identity.User.ID)
+		if err != nil {
+			return Approval{}, err
+		}
+		if submitted {
+			return Approval{}, httpx.Forbidden("you submitted evidence for this release and cannot also approve it under this project's separation-of-duties policy")
 		}
 	}
 
