@@ -42,4 +42,13 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.AdminBootstrapToken != "" {
 		t.Error("AdminBootstrapToken should default to empty (bootstrap disabled)")
 	}
+	if cfg.MCPTokenTTL.Hours() != 180*24 {
+		t.Errorf("MCPTokenTTL = %v, want 180 days", cfg.MCPTokenTTL)
+	}
+	if cfg.CITokenTTL.Hours() != 90*24 {
+		t.Errorf("CITokenTTL = %v, want 90 days", cfg.CITokenTTL)
+	}
+	if cfg.AuthRateLimitPerMin != 10 {
+		t.Errorf("AuthRateLimitPerMin = %d, want 10", cfg.AuthRateLimitPerMin)
+	}
 }

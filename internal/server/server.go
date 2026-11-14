@@ -79,7 +79,7 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Server {
 	usersStore := users.NewStore()
 
 	authStore := authn.NewStore(pool)
-	authSvc := authn.NewService(authStore, usersStore, pool, cfg.SessionTTL)
+	authSvc := authn.NewService(authStore, usersStore, pool, cfg.SessionTTL, cfg.MCPTokenTTL, cfg.CITokenTTL)
 	authHandlers := &authn.Handlers{
 		Svc: authSvc, Users: usersStore, Audit: auditStore, Pool: pool,
 		CookieName: cfg.SessionCookieName, CookieSecure: cfg.CookieSecure, SessionTTL: cfg.SessionTTL,
@@ -108,7 +108,7 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Server {
 	candidatesHandlers := candidates.NewHandlers(candidatesSvc)
 
 	approvalsStore := approvals.NewStore()
-	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc, candidatesStore)
+	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc, candidatesStore, evidenceStore)
 	approvalsHandlers := approvals.NewHandlers(approvalsSvc)
 
 	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore, candidatesStore, checklistsStore)

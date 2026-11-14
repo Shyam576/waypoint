@@ -19,6 +19,9 @@ type Config struct {
 	CookieSecure        bool
 	AdminBootstrapToken string
 	DeployAuthTTL       time.Duration
+	MCPTokenTTL         time.Duration
+	CITokenTTL          time.Duration
+	AuthRateLimitPerMin int
 	ReadTimeout         time.Duration
 	WriteTimeout        time.Duration
 	IdleTimeout         time.Duration
@@ -56,6 +59,24 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("WAYPOINT_DEPLOY_AUTH_TTL_SECONDS must be between 1 and 3600")
 	}
 	cfg.DeployAuthTTL = time.Duration(authTTLSeconds) * time.Second
+
+	mcpTTLDays, err := strconv.Atoi(getEnv("WAYPOINT_MCP_TOKEN_TTL_DAYS", "180"))
+	if err != nil || mcpTTLDays <= 0 {
+		return Config{}, fmt.Errorf("WAYPOINT_MCP_TOKEN_TTL_DAYS must be a positive integer")
+	}
+	cfg.MCPTokenTTL = time.Duration(mcpTTLDays) * 24 * time.Hour
+
+	ciTTLDays, err := strconv.Atoi(getEnv("WAYPOINT_CI_TOKEN_TTL_DAYS", "90"))
+	if err != nil || ciTTLDays <= 0 {
+		return Config{}, fmt.Errorf("WAYPOINT_CI_TOKEN_TTL_DAYS must be a positive integer")
+	}
+	cfg.CITokenTTL = time.Duration(ciTTLDays) * 24 * time.Hour
+
+	rateLimit, err := strconv.Atoi(getEnv("WAYPOINT_AUTH_RATE_LIMIT_PER_MINUTE", "10"))
+	if err != nil || rateLimit <= 0 {
+		return Config{}, fmt.Errorf("WAYPOINT_AUTH_RATE_LIMIT_PER_MINUTE must be a positive integer")
+	}
+	cfg.AuthRateLimitPerMin = rateLimit
 
 	cfg.ReadTimeout = 10 * time.Second
 	cfg.WriteTimeout = 15 * time.Second

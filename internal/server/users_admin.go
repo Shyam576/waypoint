@@ -279,6 +279,78 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, d)
 }
 
+type adminSetPasswordRequest struct {
+	NewPassword string `json:"new_password"`
+}
+
+// adminSetPassword lets an admin set a user's password directly (no
+// current-password check; RequireRole(admin) already gates this route).
+// There is no email infrastructure in this MVP, so the admin communicates
+// the new password out of band. See docs/architecture-audit.md Finding 10.
+func (s *Server) adminSetPassword(w http.ResponseWriter, r *http.Request) {
+	identity, ok := authn.IdentityFromContext(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("sign in required"))
+		return
+	}
+	targetUserID, err := uuid.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid userID"))
+		return
+	}
+	var req adminSetPasswordRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	if err := s.Auth.AdminSetPassword(r.Context(), targetUserID, req.NewPassword); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	_ = s.Audit.Record(r.Context(), s.Pool, "user", targetUserID, "password_reset_by_admin", identity.AuditActor(), nil, nil, "")
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "password reset"})
+}
+
+type setUserActiveRequest struct {
+	IsActive bool `json:"is_active"`
+}
+
+// setUserActive activates or deactivates a user. Deactivating takes
+// effect immediately: session and MCP/CI token resolution already check
+// IsActive on every request (see internal/users.Store.SetActive).
+func (s *Server) setUserActive(w http.ResponseWriter, r *http.Request) {
+	identity, ok := authn.IdentityFromContext(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("sign in required"))
+		return
+	}
+	targetUserID, err := uuid.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid userID"))
+		return
+	}
+	if targetUserID == identity.User.ID {
+		httpx.Error(w, r, httpx.Forbidden("you cannot deactivate your own account"))
+		return
+	}
+	var req setUserActiveRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	u, err := s.Users.SetActive(r.Context(), s.Pool, targetUserID, req.IsActive)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	action := "user_deactivated"
+	if req.IsActive {
+		action = "user_activated"
+	}
+	_ = s.Audit.Record(r.Context(), s.Pool, "user", targetUserID, action, identity.AuditActor(), nil, u, "")
+	httpx.JSON(w, http.StatusOK, u)
+}
+
 func (s *Server) mcpWhoami(w http.ResponseWriter, r *http.Request) {
 	identity, ok := authn.IdentityFromContext(r.Context())
 	if !ok {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/Shyam576/waypoint/internal/authn"
 	"github.com/Shyam576/waypoint/internal/httpx"
+	"github.com/Shyam576/waypoint/internal/ratelimit"
 	"github.com/Shyam576/waypoint/internal/users"
 )
 
@@ -37,16 +38,21 @@ func (s *Server) Router() http.Handler {
 	requireMCP := authn.RequireMCPToken(s.Auth)
 	requireCI := authn.RequireCIToken(s.Auth)
 	requireAdmin := authn.RequireRole(users.RoleAdmin)
+	// Rate limiting on the two endpoints that accept credentials before
+	// any authentication exists to key on. See
+	// docs/architecture-audit.md Finding 8.
+	authRateLimit := ratelimit.PerIP(s.Cfg.AuthRateLimitPerMin, time.Minute)
 
 	r.Route("/api/v1", func(api chi.Router) {
-		api.Post("/auth/login", s.AuthHandlers.Login)
-		api.Post("/bootstrap/admin", s.AuthHandlers.BootstrapAdmin)
+		api.With(authRateLimit).Post("/auth/login", s.AuthHandlers.Login)
+		api.With(authRateLimit).Post("/bootstrap/admin", s.AuthHandlers.BootstrapAdmin)
 
 		api.Group(func(web chi.Router) {
 			web.Use(requireSession)
 
 			web.Post("/auth/logout", s.AuthHandlers.Logout)
 			web.Get("/auth/me", s.AuthHandlers.Me)
+			web.Post("/auth/change-password", s.AuthHandlers.ChangePassword)
 
 			web.Get("/dashboard", s.dashboard)
 
@@ -54,6 +60,8 @@ func (s *Server) Router() http.Handler {
 				admin.Use(requireAdmin)
 				admin.Get("/users", s.listUsers)
 				admin.Post("/users", s.createUser)
+				admin.Post("/users/{userID}/password", s.adminSetPassword)
+				admin.Patch("/users/{userID}/status", s.setUserActive)
 			})
 
 			web.Post("/users/{userID}/mcp-tokens", s.issueMCPToken)
