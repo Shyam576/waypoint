@@ -252,17 +252,46 @@ deployment authorization — it is a recorded, visible fact only.
 
 ## Low-risk, can happen any time — not blocked on anything above
 
-**9. Dashboard and operational visibility (brief's Phase Nine).**
-Complexity: S–M, incremental. Pure read-side aggregation
-(`internal/server/dashboard.go` already has the pattern). Add: active/
-failed/awaiting-verification deployments, emergency releases, open
-incidents, upcoming release windows — each addable independently as the
-underlying data model gains the states above. Defer the frequency/
-failure-rate/MTTR/cycle-time *metrics* specifically until there is enough
-real recorded-event data for them to mean anything; computing them from a
-handful of rows in a demo database would be more misleading than useful,
-which the brief itself warns against ("ensure metrics are derived from
-actual recorded events").
+**9. Dashboard and operational visibility (brief's Phase Nine). — DONE.**
+Implemented: `Dashboard` (`internal/server/dashboard.go`) gains
+`emergency_releases`, `open_incidents`, `failed_deployments`, and
+`awaiting_verification_deployments`, each pure read-side aggregation
+following the exact pattern the existing `needs_my_action`/`blocked`/
+`upcoming_production`/`recent_deployments` fields already use —
+`upcoming_production` already covered "upcoming release windows," so
+nothing new was needed there. `deployments.Store` gains `ListFailed`
+and `ListAwaitingVerification`, sharing a new `queryJoined` helper with
+`ListRecent` to avoid tripling the JOIN query.
+
+While wiring this, found and fixed a latent bug from item 8:
+`ListRecent`'s own inline column list was never updated when
+`deploymentColumns`/`scanDeployment` gained the five verification
+columns, so every dashboard load would have hit a column-count
+mismatch panic the first time it ran against a deployment row. Caught
+by writing this item's own test rather than by any existing test,
+since `internal/server` had no test file before this — see
+`internal/server/dashboard_test.go` (new), which wires a full `Server`
+via `New()` against a real Postgres database, the same way
+`internal/integrationtest` wires services by hand.
+
+Frontend: `web/app/dashboard/page.tsx` gains "Emergency releases,"
+"Open incidents," "Failed deployments," and "Awaiting verification"
+sections, reusing the existing `Section`/`ReleaseRow`/`DeploymentRow`
+components (one new `IncidentRow`); `web/lib/types.ts` gains the
+`verification_status` field on `Deployment` (added to the API in item
+8 but never added to the frontend type until now) and the new
+`Dashboard` fields. `tsc --noEmit` passes. Not visually confirmed in a
+rendered browser this pass — no browser automation tool was available
+in this session; verified instead via the typecheck, a new backend
+test, and live `curl` against the real API with seeded data (emergency
+release, open incident, failed deployment, and an unverified
+successful deployment all appeared in the right buckets).
+
+Deliberately deferred, per the brief's own warning to "ensure metrics
+are derived from actual recorded events": deployment
+frequency/failure-rate/MTTR/cycle-time metrics. Computing them from a
+handful of rows would be more misleading than useful; revisit once
+there is enough real recorded-event history.
 
 **10. MCP/AI integration enhancements (brief's Phase Ten).**
 Complexity: S. The audit found this boundary already correctly enforced

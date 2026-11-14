@@ -210,6 +210,7 @@ Selected endpoints (see `internal/server/router.go` for the full list):
 ```
 POST   /api/v1/auth/login
 GET    /api/v1/auth/me
+GET    /api/v1/dashboard
 POST   /api/v1/projects
 GET    /api/v1/projects/{projectID}/releases
 POST   /api/v1/projects/{projectID}/releases
@@ -552,6 +553,39 @@ Closes [`docs/architecture-audit.md`](docs/architecture-audit.md)
 Finding 12. This is purely a recorded, visible state — it does not
 block any stage transition or the production gate; see Limitations.
 
+## Dashboard and operational visibility
+
+`GET /api/v1/dashboard` (`internal/server/dashboard.go`'s
+`DashboardService`, a pure read-side aggregation across packages with
+no business rules of its own) backs the web app's home screen,
+scoped to whatever projects the caller can see:
+
+- `needs_my_action` — releases awaiting the caller's own approval
+  decision, or with pending MCP submissions to review.
+- `blocked` — releases in `ready_for_production` that the gate
+  currently says are ineligible, with why.
+- `upcoming_production` — releases in `ready_for_production` with a
+  near-term or past-due target date.
+- `emergency_releases` — every non-closed release with `is_emergency`
+  true, flagged separately if its retrospective is still outstanding.
+- `open_incidents` — support items (`internal/support`) across every
+  visible, non-closed release whose status is `open` or
+  `investigating`.
+- `recent_deployments` / `failed_deployments` /
+  `awaiting_verification_deployments` — the most recent deployments
+  overall, the most recent whose own `result` was `failure`, and the
+  most recent successful ones still sitting at
+  `verification_status: pending` (see "Post-deployment verification"
+  above) — so a deploy that "succeeded" but was never confirmed healthy
+  doesn't quietly fall out of view.
+
+Deliberately excluded this pass (per the brief's own warning to
+"ensure metrics are derived from actual recorded events"):
+frequency/failure-rate/MTTR/cycle-time metrics. Computing those from a
+handful of rows in a new deployment would be more misleading than
+useful; they belong once there is enough real recorded-event history
+for them to mean something.
+
 ## Security hardening
 
 A set of six independent fixes from `docs/architecture-audit.md`'s
@@ -838,3 +872,11 @@ silently assumed:
   `result` already shows the failure).
 - **No web UI for submitting a verification in this pass.** API-only,
   same as rollback/emergency above.
+- **Dashboard metrics are deliberately not computed in this pass.**
+  No deployment frequency, failure rate, MTTR, or cycle-time numbers —
+  see "Dashboard and operational visibility" above for why.
+- **The dashboard's support-item and deployment queries are per-release
+  (N+1), matching the aggregation style the rest of this service
+  already uses.** Acceptable for this MVP's project/release counts; a
+  dedicated aggregate query would be the first thing to change if a
+  project ever accumulates enough releases for this to be slow.
