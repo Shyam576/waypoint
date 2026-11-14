@@ -172,11 +172,20 @@ member automatically.
    with a clear reason).
 5. An approver approves or rejects; every decision is recorded and shown
    in the release's activity timeline.
-6. A CI/CD pipeline checks `GET /api/v1/ci/releases/{id}/eligibility`
-   before deploying to production, and the deployment-recording
-   endpoint re-checks the same gate — a stale client-side check can
-   never bypass it. On a successful production deployment, the release
-   stage automatically becomes `production`.
+6. A CI/CD pipeline checks `GET /api/v1/ci/releases/{id}/eligibility`,
+   then — once it has built the artifact and knows its exact digest —
+   obtains a short-lived, single-use deployment authorization from
+   `POST /api/v1/ci/releases/{id}/deployment-authorizations` (only
+   issued when the release is currently eligible, and bound to that one
+   release and digest). The deployment-recording endpoint requires and
+   consumes that authorization for any CI-recorded production
+   deployment, and independently re-checks the same gate again — so
+   neither a stale client-side check nor a stale authorization can
+   bypass it. On a successful production deployment, the release stage
+   automatically becomes `production`. See
+   [`docs/deployment-security.md`](docs/deployment-security.md) for what
+   this does and does not enforce, and the infrastructure controls
+   needed around it.
 7. During post-release support, link incidents/fixes/follow-ups to the
    same release, then close it once the support period is handled.
 
@@ -210,8 +219,9 @@ POST   /api/v1/mcp-submissions/{id}/reject
 GET    /api/v1/mcp/releases/{releaseID}/context           (MCP token)
 POST   /api/v1/mcp/releases/{releaseID}/change-notes       (MCP token)
 
-GET    /api/v1/ci/releases/{releaseID}/eligibility          (CI token)
-POST   /api/v1/ci/releases/{releaseID}/deployments          (CI token)
+GET    /api/v1/ci/releases/{releaseID}/eligibility                      (CI token)
+POST   /api/v1/ci/releases/{releaseID}/deployment-authorizations        (CI token)
+POST   /api/v1/ci/releases/{releaseID}/deployments                      (CI token)
 
 GET    /healthz
 GET    /readyz
@@ -236,14 +246,52 @@ project (`GET`/`PATCH /api/v1/projects/{id}/policy`); a sensible default
 is seeded when a project is created (`change_summary`, `test_results`,
 `uat_signoff`, `rollback_plan`; 1 required approval).
 
+Eligibility alone is **not** what gates a CI-recorded production
+deployment — see the next section.
+
+## Deployment authorization
+
+`GET .../eligibility` is a read-only, human-readable check: it answers
+"would a production deployment be accepted right now," but calling it
+does not authorize anything. The actual gate for a CI-recorded
+production deployment is a short-lived, single-use **deployment
+authorization**, minted only when the release is eligible and bound to
+one exact release + artifact digest:
+
+1. Build your artifact and know its immutable digest (e.g. `sha256:...`).
+2. `POST /api/v1/ci/releases/{id}/deployment-authorizations` with
+   `{"artifact_digest": "sha256:..."}`. This re-runs the same
+   `gate.Evaluate` the eligibility endpoint uses; it fails with `409` and
+   the current blockers if the release isn't eligible. On success it
+   returns a `token`, shown exactly once, that expires after
+   `WAYPOINT_DEPLOY_AUTH_TTL_SECONDS` (default 900s / 15 minutes).
+3. Deploy the artifact.
+4. `POST /api/v1/ci/releases/{id}/deployments` with
+   `"environment": "production"` and
+   `"deployment_authorization_token"` set to that token, alongside the
+   same `artifact_digest`. The token is consumed atomically on first use
+   (concurrent attempts with the same token can never both succeed), and
+   is rejected if it's missing, expired, already used, or minted for a
+   different release or digest than the one being recorded.
+
+Non-production deployments, and deployments recorded manually from the
+web app by an admin/release coordinator, do not require or use this
+token — see [`docs/deployment-security.md`](docs/deployment-security.md)
+for exactly what this does and does not close, and what has to exist
+outside Waypoint's own code (branch protection, environment reviewers,
+cluster/registry access control) for it to be meaningful rather than
+advisory.
+
 ## GitHub Actions integration
 
 See [`deploy/github-actions/deploy.yml`](deploy/github-actions/deploy.yml)
-for a sample workflow: it calls the CI eligibility endpoint, stops the
-job if the release isn't eligible, runs your real build/deploy steps,
-and records the result (success or failure) with the deployment's
-immutable artifact digest, commit SHA, and the workflow run's own URL.
-Copy it into the target service's own repository and fill in the real
+for a sample workflow: it calls the CI eligibility endpoint, builds the
+artifact, obtains a deployment authorization for that artifact's exact
+digest (stopping the job if the release isn't eligible), runs your real
+deploy step, and records the result (success or failure) with the
+deployment's immutable artifact digest, commit SHA, and the workflow
+run's own URL — consuming the authorization in the same call. Copy it
+into the target service's own repository and fill in the real
 build/deploy steps.
 
 Mint a CI token (admin or release coordinator on the project):
@@ -327,6 +375,7 @@ real secrets are committed anywhere in this repository.
 | `WAYPOINT_COOKIE_SECURE` | api | set `true` behind HTTPS |
 | `WAYPOINT_CORS_ORIGIN` | api | allowed origin (not needed in the Docker Compose setup, where the browser never calls the API cross-origin) |
 | `ADMIN_BOOTSTRAP_TOKEN` | api | enables the one-time `/bootstrap/admin` endpoint; unset disables it |
+| `WAYPOINT_DEPLOY_AUTH_TTL_SECONDS` | api | how long a minted deployment authorization stays valid before it must be re-issued; default `900` (15 min), max `3600` |
 | `WAYPOINT_API_URL` | web (build-time) | backend URL the Next.js proxy forwards to |
 | `WAYPOINT_API_BASE_URL`, `WAYPOINT_MCP_TOKEN` | cmd/mcp | backend URL + the developer's MCP token |
 
@@ -377,3 +426,20 @@ silently assumed:
 - **No real GitHub App / webhook integration.** Work item, PR, commit,
   and CI run links are manually pasted URLs, per the brief.
 - **Rate limiting is not implemented** on any endpoint.
+- **Deployment authorizations bind to a release and an artifact digest,
+  but approvals and evidence still don't.** The authorization in
+  "Deployment authorization" above (added to close
+  [`docs/architecture-audit.md`](docs/architecture-audit.md) Finding 1)
+  makes production deployment require a short-lived, single-use,
+  gate-checked credential tied to one exact digest. It does not yet make
+  the approvals themselves record which artifact they were approving —
+  that is Finding 2 / roadmap item 2 in
+  [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md),
+  not yet implemented.
+- **Making the authorization check unavoidable also requires controls
+  outside this repository** (GitHub Environment protection rules,
+  branch protection on the workflow file, scoped cluster/registry
+  credentials) — see
+  [`docs/deployment-security.md`](docs/deployment-security.md). Nothing
+  in this codebase can prevent a deployment that never calls Waypoint's
+  API at all; it can only make the API path the correct, auditable one.

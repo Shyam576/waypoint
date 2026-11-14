@@ -1,7 +1,14 @@
 # Example workflow showing how a production deployment job integrates
-# with Waypoint's production gate. Copy this into .github/workflows/ in
-# the service's own repository and adjust the build/push steps for that
-# service.
+# with Waypoint's production gate and deployment authorization. Copy
+# this into .github/workflows/ in the service's own repository and
+# adjust the build/push steps for that service.
+#
+# This workflow file calling the gate is necessary but not sufficient —
+# it only matters if nothing else can deploy to production without going
+# through it. See ../../docs/deployment-security.md for the required
+# supporting controls: branch protection on this file, required
+# reviewers on the `production` GitHub Environment below, and restricting
+# direct cluster/registry credentials away from individual developers.
 #
 # Required repository secrets (Settings -> Secrets and variables ->
 # Actions), scoped only to this repo/environment — never commit real
@@ -32,7 +39,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check Waypoint production eligibility
-        id: gate
         env:
           WAYPOINT_API_URL: ${{ secrets.WAYPOINT_API_URL }}
           WAYPOINT_CI_TOKEN: ${{ secrets.WAYPOINT_CI_TOKEN }}
@@ -55,11 +61,14 @@ jobs:
             echo "$body" | python3 -c 'import json,sys; [print("-", b) for b in json.load(sys.stdin)["blockers"]]'
             exit 1
           fi
-          echo "Release is eligible for production."
+          echo "Release is eligible for production as of this check."
 
-      # --- Your actual build/push/deploy steps go here. ---
+      # --- Your actual build/push steps go here. ---
       # This example just shows the digest-capturing shape; replace with
-      # your real build and deploy commands.
+      # your real build and push commands. The authorization step right
+      # after this one needs the *exact* digest you are about to deploy —
+      # never a mutable tag — because the authorization it mints is bound
+      # to this one value.
       - name: Build and push image
         id: build
         run: |
@@ -69,6 +78,38 @@ jobs:
           digest="sha256:REPLACE_WITH_REAL_IMMUTABLE_DIGEST"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The eligibility check above is advisory; this is the actual gate.
+      # It re-evaluates eligibility itself (so a check-then-build delay
+      # can't go stale) and, only if still eligible, mints a short-lived,
+      # single-use token bound to this release and this exact digest. The
+      # "Record deployment result" step below must present this same
+      # token, and it is rejected if reused, expired, or for a different
+      # digest — see ../../docs/deployment-security.md.
+      - name: Obtain deployment authorization
+        id: authorize
+        env:
+          WAYPOINT_API_URL: ${{ secrets.WAYPOINT_API_URL }}
+          WAYPOINT_CI_TOKEN: ${{ secrets.WAYPOINT_CI_TOKEN }}
+          RELEASE_ID: ${{ github.event.inputs.release_id }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          response="$(curl -sS -w '\n%{http_code}' -X POST \
+            -H "Authorization: Bearer ${WAYPOINT_CI_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${WAYPOINT_API_URL}/api/v1/ci/releases/${RELEASE_ID}/deployment-authorizations" \
+            -d "$(python3 -c 'import json,os; print(json.dumps({"artifact_digest": os.environ["DIGEST"]}))')")"
+          status="$(echo "$response" | tail -n1)"
+          body="$(echo "$response" | sed '$d')"
+          if [ "$status" != "201" ]; then
+            echo "Waypoint refused to authorize this deployment (HTTP $status): $body"
+            exit 1
+          fi
+          token="$(echo "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+          echo "Deployment authorized for digest $DIGEST."
+
       - name: Deploy
         id: deploy
         run: |
@@ -76,12 +117,13 @@ jobs:
           # kubectl set image ... / your actual deploy command
 
       - name: Record deployment result in Waypoint
-        if: always()
+        if: always() && steps.authorize.outputs.token != ''
         env:
           WAYPOINT_API_URL: ${{ secrets.WAYPOINT_API_URL }}
           WAYPOINT_CI_TOKEN: ${{ secrets.WAYPOINT_CI_TOKEN }}
           RELEASE_ID: ${{ github.event.inputs.release_id }}
           DIGEST: ${{ steps.build.outputs.digest }}
+          AUTH_TOKEN: ${{ steps.authorize.outputs.token }}
           RESULT: ${{ job.status == 'success' && 'success' || 'failure' }}
         run: |
           set -euo pipefail
@@ -97,5 +139,6 @@ print(json.dumps({
     "commit_sha": os.environ.get("GITHUB_SHA", ""),
     "workflow_run_url": f"{os.environ[\"GITHUB_SERVER_URL\"]}/{os.environ[\"GITHUB_REPOSITORY\"]}/actions/runs/{os.environ[\"GITHUB_RUN_ID\"]}",
     "result": os.environ["RESULT"],
+    "deployment_authorization_token": os.environ["AUTH_TOKEN"],
 }))
 ')"
