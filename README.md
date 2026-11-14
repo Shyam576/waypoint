@@ -47,6 +47,7 @@ internal/     business logic, one package per domain area
   projects    projects, release policy, membership
   releases    release record and stage transition rules
   evidence    evidence submissions (test results, sign-off, ...)
+  candidates  release candidates: the immutable build identity (commit, image digest, ...) a release currently points at
   approvals   approve/reject decisions
   gate        the production eligibility check
   deployments deployment records, CI-token-protected endpoints
@@ -219,7 +220,11 @@ POST   /api/v1/mcp-submissions/{id}/reject
 GET    /api/v1/mcp/releases/{releaseID}/context           (MCP token)
 POST   /api/v1/mcp/releases/{releaseID}/change-notes       (MCP token)
 
+GET    /api/v1/releases/{releaseID}/candidates
+POST   /api/v1/releases/{releaseID}/candidates
+
 GET    /api/v1/ci/releases/{releaseID}/eligibility                      (CI token)
+POST   /api/v1/ci/releases/{releaseID}/candidates                      (CI token)
 POST   /api/v1/ci/releases/{releaseID}/deployment-authorizations        (CI token)
 POST   /api/v1/ci/releases/{releaseID}/deployments                      (CI token)
 
@@ -281,6 +286,41 @@ for exactly what this does and does not close, and what has to exist
 outside Waypoint's own code (branch protection, environment reviewers,
 cluster/registry access control) for it to be meaningful rather than
 advisory.
+
+## Release candidates and artifact integrity
+
+A release candidate (`internal/candidates`) is the immutable build
+identity — git repo/branch, commit SHA, build ID, image digest, app
+version, config/migration checksums, build provenance URL — a release
+currently points at. A release's **current candidate** is simply the
+most recently registered one for it; there's no separate pointer to keep
+in sync.
+
+- `POST /api/v1/releases/{id}/candidates` (web) or
+  `POST /api/v1/ci/releases/{id}/candidates` (CI token) registers one.
+  Only `image_digest` is required.
+- Whenever a candidate is registered, a deployment authorization
+  (above) can only be minted for that exact digest — requesting one for
+  any other digest is rejected, regardless of project policy.
+- Each approval decision (`POST .../approvals`) is stamped with whichever
+  candidate was current at the moment of the decision.
+- A project can additionally set
+  `require_candidate_for_approval: true` on its policy
+  (`PATCH /api/v1/projects/{id}/policy`, default `false`). When set, the
+  gate (`internal/gate.Evaluate`) only counts an approval toward the
+  required-approvals count while it still matches the release's current
+  candidate — registering a *new* candidate (the artifact changed)
+  silently drops every prior approval from the count, with no separate
+  "invalidate" step, forcing a fresh approval against the new build
+  before the release is eligible again. With the flag unset (the
+  default), approvals count the same way they always have, so existing
+  projects are unaffected.
+
+This closes
+[`docs/architecture-audit.md`](docs/architecture-audit.md) Finding 2 for
+any project that registers candidates; it is opt-in (beyond the
+always-on authorization/digest check above) rather than mandatory, to
+avoid silently changing behavior for projects that don't use it.
 
 ## GitHub Actions integration
 
@@ -426,16 +466,20 @@ silently assumed:
 - **No real GitHub App / webhook integration.** Work item, PR, commit,
   and CI run links are manually pasted URLs, per the brief.
 - **Rate limiting is not implemented** on any endpoint.
-- **Deployment authorizations bind to a release and an artifact digest,
-  but approvals and evidence still don't.** The authorization in
-  "Deployment authorization" above (added to close
-  [`docs/architecture-audit.md`](docs/architecture-audit.md) Finding 1)
-  makes production deployment require a short-lived, single-use,
-  gate-checked credential tied to one exact digest. It does not yet make
-  the approvals themselves record which artifact they were approving —
-  that is Finding 2 / roadmap item 2 in
-  [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md),
-  not yet implemented.
+- **Candidate-bound approvals are opt-in, not mandatory.** A project
+  must set `require_candidate_for_approval: true` (see "Release
+  candidates and artifact integrity" above) for approvals to actually be
+  invalidated when the artifact changes; with the (default) flag unset,
+  approvals count exactly as they did before release candidates existed.
+  This was a deliberate choice to avoid silently changing gate behavior
+  for every existing project — see `docs/architecture-audit.md` Finding 2
+  and `docs/implementation-roadmap.md` item 2 for the reasoning.
+- **Evidence still isn't bound to a candidate or verified beyond being
+  present.** Anyone with project visibility can submit any evidence
+  type as free text (Finding 5) — registering a release candidate
+  constrains *approvals* and *deployment authorization*, not evidence.
+  A structured, ownership/verification-aware checklist engine (roadmap
+  item 4) is the planned fix.
 - **Making the authorization check unavoidable also requires controls
   outside this repository** (GitHub Environment protection rules,
   branch protection on the workflow file, scoped cluster/registry

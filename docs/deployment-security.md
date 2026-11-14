@@ -63,14 +63,19 @@ credentials can still deploy with zero interaction with Waypoint. Closing
 and is described below rather than something this repository can enforce
 on its own.
 
-**Artifact integrity beyond the digest match is still open.** The
-authorization binds to a digest the CI pipeline *claims* it built, and
-nothing yet verifies that digest traces back through a specific commit,
-build, and set of approvals (there is no `release_candidates` table yet
-— that's roadmap item 2). An approver today is approving "this release,"
-not "this specific artifact"; the authorization only guarantees "the
-artifact being deployed is the same one the authorization was minted
-for," not "the artifact was itself independently verified."
+**Artifact integrity is now partially closed, and opt-in for approvals.**
+`internal/candidates` (roadmap item 2, implemented) lets a release
+register its current build identity (commit, image digest,
+config/migration checksums); whenever one is registered,
+`IssueAuthorization` rejects a digest that doesn't match it — this part
+is always on, not policy-gated. Binding *approvals* to that same
+candidate (so an approval stops counting once the artifact changes) is
+opt-in per project via `policy.require_candidate_for_approval`
+(default `false`) — see README "Release candidates and artifact
+integrity". A project that never registers a candidate, or never sets
+that flag, is in the same position as before: an approver approves "this
+release," not a specific artifact, and evidence is never bound to a
+candidate at all (that remains open, folded into roadmap item 4).
 
 ## Required controls outside this repository
 

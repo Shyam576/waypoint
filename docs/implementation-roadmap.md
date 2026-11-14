@@ -40,16 +40,28 @@ registry-access boundary that keeps ordinary developer credentials from
 deploying directly. `deploy/github-actions/deploy.yml` was updated to the
 real authorize-then-deploy-then-record flow.
 
-**2. Release artifact integrity (closes Finding 2).**
-Complexity: M. Depends on: do alongside item 1 — the authorization token
-in item 1 should carry this artifact's identity.
-A `release_candidates` table: git repo, branch, commit SHA, build ID,
-image digest, app version, config checksum, migration checksum, optional
-build provenance. Approvals and evidence continue to attach to the
-release, but `gate.Evaluate` (and the new authorization mint in item 1)
-check against the release's *current* candidate; changing the candidate
-after approval requires revalidation per policy (configurable: require
-all new, or only new high-risk-category, approvals).
+**2. Release artifact integrity (closes Finding 2). — DONE (opt-in).**
+Implemented: `internal/candidates` (new package), migration
+`0010_release_candidates.sql`,
+`POST /api/v1/releases/{id}/candidates` (web) and
+`POST /api/v1/ci/releases/{id}/candidates` (CI). A release's current
+candidate is the most recently registered row for it. Two enforcement
+points:
+- **Always on, no flag:** `IssueAuthorization` (item 1) rejects a
+  request whose `artifact_digest` doesn't match a registered current
+  candidate's `image_digest`, whenever one is registered.
+- **Opt-in per project** (`policy.require_candidate_for_approval`,
+  default `false`): when set, `gate.Evaluate` only counts an approval
+  toward the required count while its stamped `candidate_id` matches the
+  current candidate; registering a new candidate silently drops stale
+  approvals from the count with no separate invalidation step.
+
+Made opt-in for approvals (not evidence, and not mandatory) specifically
+to avoid changing gate behavior for every existing project and every
+existing test; see README "Release candidates and artifact integrity"
+for the full behavior and `docs/architecture-audit.md` Finding 2 for why
+evidence binding remains open (folded into item 4, the checklist
+engine).
 
 **3. Policy snapshotting per release (closes Finding 3).**
 Complexity: S. Depends on: nothing, but touches the same `gate.Evaluate`
