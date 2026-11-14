@@ -7,6 +7,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Shyam576/waypoint/internal/authn"
+	"github.com/Shyam576/waypoint/internal/candidates"
+	"github.com/Shyam576/waypoint/internal/checklists"
 	"github.com/Shyam576/waypoint/internal/httpx"
 	"github.com/Shyam576/waypoint/internal/mcpnotes"
 	"github.com/Shyam576/waypoint/internal/releases"
@@ -16,13 +18,21 @@ import (
 // get_release_context tool: enough for Claude to understand where a
 // release stands and what is already linked to it, without exposing raw
 // audit internals or anything beyond what the authenticated developer
-// could already see in the web app.
+// could already see in the web app. ChecklistItems and CurrentCandidate
+// were added once internal/checklists and internal/candidates existed
+// (roadmap item 10) — read-only, same as everything else here: nothing
+// this handler returns, and nothing else reachable from an MCP token,
+// can approve a release, change a policy, or authorize/record a
+// production deployment (see internal/approvals.Service.Decide and
+// internal/projects.Service.canManage for where that is enforced).
 type MCPReleaseContext struct {
 	Release                releases.Release          `json:"release"`
 	Links                  []releases.Link           `json:"links"`
 	EvidenceTypesSubmitted []string                  `json:"evidence_types_submitted"`
 	ApprovedCount          int                       `json:"approved_count"`
 	Eligibility            map[string]any            `json:"eligibility"`
+	ChecklistItems         []checklists.ReleaseItem  `json:"checklist_items"`
+	CurrentCandidate       *candidates.Candidate     `json:"current_candidate,omitempty"`
 	ChangeNotes            []mcpnotes.ChangeNote     `json:"change_notes"`
 	DesignDecisions        []mcpnotes.DesignDecision `json:"design_decisions"`
 	PendingSubmissions     int                       `json:"pending_submissions"`
@@ -77,6 +87,16 @@ func (s *Server) mcpReleaseContext(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, err)
 		return
 	}
+	checklistItems, err := s.ChecklistsStore.ListByRelease(r.Context(), s.Pool, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	currentCandidate, err := s.CandidatesStore.GetCurrentByRelease(r.Context(), s.Pool, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
 	changeNotes, err := s.MCPNotesStore.ListChangeNotesByRelease(r.Context(), s.Pool, id)
 	if err != nil {
 		httpx.Error(w, r, err)
@@ -96,7 +116,8 @@ func (s *Server) mcpReleaseContext(w http.ResponseWriter, r *http.Request) {
 
 	httpx.JSON(w, http.StatusOK, MCPReleaseContext{
 		Release: rel, Links: nonNilLinks(links), EvidenceTypesSubmitted: evidenceTypes, ApprovedCount: approvedCount,
-		Eligibility: map[string]any{"eligible": eligibility.Eligible, "blockers": eligibility.Blockers, "stage": eligibility.Stage},
+		Eligibility:    map[string]any{"eligible": eligibility.Eligible, "blockers": eligibility.Blockers, "stage": eligibility.Stage},
+		ChecklistItems: nonNilChecklistItems(checklistItems), CurrentCandidate: currentCandidate,
 		ChangeNotes: nonNilChangeNotes(changeNotes), DesignDecisions: nonNilDesignDecisions(designDecisions),
 		PendingSubmissions: len(pending),
 	})
