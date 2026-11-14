@@ -38,13 +38,14 @@ var ValidEvidenceTypes = map[string]bool{
 }
 
 type Policy struct {
-	ID                     uuid.UUID  `json:"id"`
-	ProjectID              uuid.UUID  `json:"project_id"`
-	RequiredEvidenceTypes  []string   `json:"required_evidence_types"`
-	RequiredApprovalsCount int        `json:"required_approvals_count"`
-	BlockOnOpenRejection   bool       `json:"block_on_open_rejection"`
-	UpdatedBy              *uuid.UUID `json:"updated_by,omitempty"`
-	UpdatedAt              time.Time  `json:"updated_at"`
+	ID                          uuid.UUID  `json:"id"`
+	ProjectID                   uuid.UUID  `json:"project_id"`
+	RequiredEvidenceTypes       []string   `json:"required_evidence_types"`
+	RequiredApprovalsCount      int        `json:"required_approvals_count"`
+	BlockOnOpenRejection        bool       `json:"block_on_open_rejection"`
+	RequireCandidateForApproval bool       `json:"require_candidate_for_approval"`
+	UpdatedBy                   *uuid.UUID `json:"updated_by,omitempty"`
+	UpdatedAt                   time.Time  `json:"updated_at"`
 }
 
 type Member struct {

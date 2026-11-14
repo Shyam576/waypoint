@@ -126,6 +126,14 @@ func (s *Service) GetForService(ctx context.Context, identity authn.Identity, id
 	return s.Get(ctx, identity, id)
 }
 
+// CanEdit is exported so other packages (candidates) can reuse the same
+// "may this identity create/change things on this project's releases"
+// check instead of duplicating it, the same way projects.Service exports
+// CanView/CanManage.
+func (s *Service) CanEdit(ctx context.Context, identity authn.Identity, projectID uuid.UUID) (bool, error) {
+	return s.canEdit(ctx, identity, projectID)
+}
+
 func (s *Service) ListByProject(ctx context.Context, identity authn.Identity, projectID uuid.UUID, stage *Stage) ([]Release, error) {
 	ok, err := s.projects.CanView(ctx, identity, projectID)
 	if err != nil {

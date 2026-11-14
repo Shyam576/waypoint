@@ -195,9 +195,10 @@ func (s *Service) GetPolicy(ctx context.Context, identity authn.Identity, projec
 }
 
 type UpdatePolicyInput struct {
-	RequiredEvidenceTypes  []string
-	RequiredApprovalsCount int
-	BlockOnOpenRejection   bool
+	RequiredEvidenceTypes       []string
+	RequiredApprovalsCount      int
+	BlockOnOpenRejection        bool
+	RequireCandidateForApproval bool
 }
 
 func (s *Service) UpdatePolicy(ctx context.Context, identity authn.Identity, projectID uuid.UUID, in UpdatePolicyInput) (Policy, error) {
@@ -228,7 +229,7 @@ func (s *Service) UpdatePolicy(ctx context.Context, identity authn.Identity, pro
 	}
 	defer tx.Rollback(ctx)
 
-	after, err := s.store.UpdatePolicy(ctx, tx, projectID, in.RequiredEvidenceTypes, in.RequiredApprovalsCount, in.BlockOnOpenRejection, identity.User.ID)
+	after, err := s.store.UpdatePolicy(ctx, tx, projectID, in.RequiredEvidenceTypes, in.RequiredApprovalsCount, in.BlockOnOpenRejection, in.RequireCandidateForApproval, identity.User.ID)
 	if err != nil {
 		return Policy{}, err
 	}

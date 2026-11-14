@@ -86,30 +86,30 @@ func (s *Store) CreatePolicy(ctx context.Context, q dbx.Querier, projectID uuid.
 	err := q.QueryRow(ctx, `
 		INSERT INTO project_policies (project_id)
 		VALUES ($1)
-		RETURNING id, project_id, required_evidence_types, required_approvals_count, block_on_open_rejection, updated_by, updated_at`,
+		RETURNING id, project_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, updated_by, updated_at`,
 		projectID,
-	).Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.UpdatedBy, &p.UpdatedAt)
+	).Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.UpdatedBy, &p.UpdatedAt)
 	return p, err
 }
 
 func (s *Store) GetPolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID) (Policy, error) {
 	var p Policy
 	err := q.QueryRow(ctx, `
-		SELECT id, project_id, required_evidence_types, required_approvals_count, block_on_open_rejection, updated_by, updated_at
+		SELECT id, project_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, updated_by, updated_at
 		FROM project_policies WHERE project_id = $1`, projectID,
-	).Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.UpdatedBy, &p.UpdatedAt)
+	).Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.UpdatedBy, &p.UpdatedAt)
 	return p, err
 }
 
-func (s *Store) UpdatePolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID, requiredEvidenceTypes []string, requiredApprovalsCount int, blockOnOpenRejection bool, updatedBy uuid.UUID) (Policy, error) {
+func (s *Store) UpdatePolicy(ctx context.Context, q dbx.Querier, projectID uuid.UUID, requiredEvidenceTypes []string, requiredApprovalsCount int, blockOnOpenRejection, requireCandidateForApproval bool, updatedBy uuid.UUID) (Policy, error) {
 	var p Policy
 	err := q.QueryRow(ctx, `
 		UPDATE project_policies
-		SET required_evidence_types = $2, required_approvals_count = $3, block_on_open_rejection = $4, updated_by = $5, updated_at = now()
+		SET required_evidence_types = $2, required_approvals_count = $3, block_on_open_rejection = $4, require_candidate_for_approval = $5, updated_by = $6, updated_at = now()
 		WHERE project_id = $1
-		RETURNING id, project_id, required_evidence_types, required_approvals_count, block_on_open_rejection, updated_by, updated_at`,
-		projectID, requiredEvidenceTypes, requiredApprovalsCount, blockOnOpenRejection, updatedBy,
-	).Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.UpdatedBy, &p.UpdatedAt)
+		RETURNING id, project_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, updated_by, updated_at`,
+		projectID, requiredEvidenceTypes, requiredApprovalsCount, blockOnOpenRejection, requireCandidateForApproval, updatedBy,
+	).Scan(&p.ID, &p.ProjectID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.UpdatedBy, &p.UpdatedAt)
 	return p, err
 }
 
