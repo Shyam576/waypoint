@@ -4,8 +4,8 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import RequireAuth from '@/components/RequireAuth';
 import { api, ApiError } from '@/lib/api';
-import type { Dashboard, DashboardReleaseRow, Deployment } from '@/lib/types';
-import { StageBadge, StatusBadge } from '@/components/Badge';
+import type { Dashboard, DashboardReleaseRow, DashboardSupportItem, Deployment } from '@/lib/types';
+import { StageBadge, StatusBadge, SeverityBadge } from '@/components/Badge';
 import { LoadingState, ErrorState, EmptyState } from '@/components/Feedback';
 import { useSession } from '@/lib/session';
 
@@ -31,7 +31,32 @@ function DeploymentRow({ d }: { d: Deployment }) {
           {d.environment} · {new Date(d.occurred_at).toLocaleString()}
         </div>
       </div>
-      <StatusBadge value={d.result} />
+      <div className="flex items-center gap-1.5">
+        <StatusBadge value={d.result} />
+        {d.result === 'success' && (
+          <>
+            <span className="text-xs text-slate-400">verify</span>
+            <StatusBadge value={d.verification_status} />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function IncidentRow({ item }: { item: DashboardSupportItem }) {
+  return (
+    <div className="list-row">
+      <div className="min-w-0">
+        <div className="truncate font-medium text-slate-900">{item.summary}</div>
+        <div className="text-xs text-slate-500">
+          {item.release_name} · {item.project_name}
+        </div>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <SeverityBadge severity={item.severity} />
+        <StatusBadge value={item.status} />
+      </div>
     </div>
   );
 }
@@ -101,6 +126,54 @@ function DashboardContent() {
           <div className="card-list">
             {data.upcoming_production.map((r) => (
               <ReleaseRow key={r.id} row={r} />
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Emergency releases" count={data.emergency_releases.length}>
+        {data.emergency_releases.length === 0 ? (
+          <EmptyState label="No releases are currently declared an emergency." />
+        ) : (
+          <div className="card-list">
+            {data.emergency_releases.map((r) => (
+              <ReleaseRow key={r.id} row={r} />
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Open incidents" count={data.open_incidents.length}>
+        {data.open_incidents.length === 0 ? (
+          <EmptyState label="No open or investigating support items." />
+        ) : (
+          <div className="card-list">
+            {data.open_incidents.map((item) => (
+              <IncidentRow key={item.id} item={item} />
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Failed deployments" count={data.failed_deployments.length}>
+        {data.failed_deployments.length === 0 ? (
+          <EmptyState label="No recent deployments failed." />
+        ) : (
+          <div className="card-list">
+            {data.failed_deployments.map((d) => (
+              <DeploymentRow key={d.id} d={d} />
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Awaiting verification" count={data.awaiting_verification_deployments.length}>
+        {data.awaiting_verification_deployments.length === 0 ? (
+          <EmptyState label="No successful deployments are awaiting a health check." />
+        ) : (
+          <div className="card-list">
+            {data.awaiting_verification_deployments.map((d) => (
+              <DeploymentRow key={d.id} d={d} />
             ))}
           </div>
         )}

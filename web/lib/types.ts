@@ -107,6 +107,8 @@ export interface Approval {
 export type Environment = 'development' | 'uat' | 'staging' | 'production';
 export type DeploymentResult = 'success' | 'failure';
 
+export type VerificationStatus = 'pending' | 'passed' | 'failed';
+
 export interface Deployment {
   id: string;
   release_id: string;
@@ -119,6 +121,11 @@ export interface Deployment {
   recorded_via: 'ci' | 'web';
   occurred_at: string;
   created_at: string;
+  verification_status: VerificationStatus;
+  verified_by?: string | null;
+  verified_via?: 'ci' | 'web' | null;
+  verified_at?: string | null;
+  verification_note: string;
 }
 
 export type SupportSeverity = 'low' | 'medium' | 'high' | 'critical';
@@ -229,11 +236,20 @@ export interface DashboardReleaseRow extends Release {
   reason?: string;
 }
 
+export interface DashboardSupportItem extends SupportItem {
+  release_name: string;
+  project_name: string;
+}
+
 export interface Dashboard {
   needs_my_action: DashboardReleaseRow[];
   blocked: DashboardReleaseRow[];
   upcoming_production: DashboardReleaseRow[];
+  emergency_releases: DashboardReleaseRow[];
+  open_incidents: DashboardSupportItem[];
   recent_deployments: Deployment[];
+  failed_deployments: Deployment[];
+  awaiting_verification_deployments: Deployment[];
 }
 
 export interface ApiErrorBody {
