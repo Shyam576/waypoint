@@ -651,7 +651,11 @@ repository secret (`WAYPOINT_CI_TOKEN`). Never commit it.
 `cmd/mcp` exposes four tools, scoped narrowly to release coordination
 notes:
 
-- `get_release_context` — read a release's status, evidence checklist, approvals, linked work, and recent notes.
+- `get_release_context` — a release's status, linked work, evidence
+  types submitted, approval count, eligibility, go-live checklist items
+  (`internal/checklists`) with their status, the current release
+  candidate (`internal/candidates`) if one is registered, and recent
+  notes. Read-only, same visibility rules as the web app.
 - `submit_change_note` — what changed, why, affected service/files, tests run, linked PR/commit.
 - `submit_design_decision` — the decision, rationale, alternatives considered, impact, linked PR/commit.
 - `submit_support_note` — a post-go-live issue, investigation, or fix note.
@@ -660,6 +664,18 @@ notes:
 accepted release evidence by itself — a developer must review and
 confirm it in the web app (or reject it) first. Claude's transcripts are
 never stored; only the structured fields the tool call sends.
+
+**Nothing reachable from an MCP token can approve a release, change a
+project's policy, or authorize/record a production deployment.** This
+is true structurally — no MCP route wires to any of those handlers —
+and also checked explicitly in the service layer itself
+(`approvals.Service.Decide` and `projects.Service.canManage`, the
+single chokepoint shared by policy updates, membership changes,
+emergency declaration, risk acceptance, checklist waivers, and
+rollback initiation/verification) so it stays true even if a route is
+ever added by mistake. A compromised or overly-trusted MCP token can,
+at most, read what its owner could already see and propose notes a
+human still has to accept.
 
 ### 1. Mint a per-user MCP token
 

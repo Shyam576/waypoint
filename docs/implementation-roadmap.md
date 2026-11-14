@@ -293,14 +293,43 @@ frequency/failure-rate/MTTR/cycle-time metrics. Computing them from a
 handful of rows would be more misleading than useful; revisit once
 there is enough real recorded-event history.
 
-**10. MCP/AI integration enhancements (brief's Phase Ten).**
-Complexity: S. The audit found this boundary already correctly enforced
-(structurally, not just by convention — see the audit's "what's already
-solid" section), so this is incremental polish, not a gap to close:
-richer `get_release_context` (surface checklist/candidate state once
-items 2 and 4 exist), and keeping the explicit rule — already true today
-and must stay true — that nothing reachable from an MCP token can approve
-a release, change a policy, or authorize/record a production deployment.
+**10. MCP/AI integration enhancements (brief's Phase Ten). — DONE.**
+Implemented:
+
+- **Richer `get_release_context`** (`internal/server/mcp_context.go`):
+  `MCPReleaseContext` gains `checklist_items` (full
+  `[]checklists.ReleaseItem`, including status) and `current_candidate`
+  (`*candidates.Candidate`, nil if none registered), now that items 2
+  and 4 both exist. Read-only, same visibility rules as every other
+  field already returned.
+- **Hardened the "nothing reachable from an MCP token can approve a
+  release, change a policy, or authorize/record a production
+  deployment" rule with an explicit, defense-in-depth check**, rather
+  than leaving it true only because no MCP route currently wires to
+  those handlers. `approvals.Service.Decide` now refuses any
+  `identity.Via == authn.ViaMCP` outright.
+  `projects.Service.canManage` — the single chokepoint shared by
+  `UpdatePolicy`, `UpdateRiskPolicy`, `UpdateEmergencyPolicy`,
+  `AddMember`, `releases.Service.DeclareEmergency`/`AcceptRisk`,
+  `checklists.Service.Waive`, and
+  `deployments.Service.InitiateRollback`/`VerifyRollback`/
+  `RecordFromWeb` — does the same. The CI-side equivalent
+  (`resolveCIRelease` checking `identity.Via != authn.ViaCI`) already
+  existed from item 1 and needed no change. Found no gap in the
+  audit's "already solid" assessment — this is deliberately *stronger*
+  than what the audit required, closing the gap where a future routing
+  mistake (an MCP route accidentally wired to one of these handlers)
+  would otherwise have silently worked for any MCP token whose owner
+  happened to hold the right role.
+- Tests (`internal/server/mcp_context_test.go`, new): richer context
+  returned correctly over real HTTP via `httptest`, and a direct
+  regression test proving an MCP-via identity is refused by both
+  `UpdatePolicy` and `Decide` even when its owning user is an
+  admin/approver — while the same user's ordinary web identity still
+  works, proving the check isn't overbroad. Verified live against the
+  Docker dev stack: no MCP route exists for either action (`404`), and
+  the MCP token is rejected outright on the web-only route (`401`,
+  since it authenticates by bearer token, not session cookie).
 
 ## Testing, throughout
 
