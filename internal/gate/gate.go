@@ -15,32 +15,35 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Shyam576/waypoint/internal/approvals"
+	"github.com/Shyam576/waypoint/internal/candidates"
 	"github.com/Shyam576/waypoint/internal/evidence"
 	"github.com/Shyam576/waypoint/internal/projects"
 	"github.com/Shyam576/waypoint/internal/releases"
 )
 
 type Result struct {
-	Eligible                      bool     `json:"eligible"`
-	Blockers                      []string `json:"blockers"`
-	Stage                         string   `json:"stage"`
-	RequiredEvidenceTypes         []string `json:"required_evidence_types"`
-	MissingEvidenceTypes          []string `json:"missing_evidence_types"`
-	RequiredApprovalsCount        int      `json:"required_approvals_count"`
-	ApprovedCount                 int      `json:"approved_count"`
-	MostRecentDecisionIsRejection bool     `json:"most_recent_decision_is_rejection"`
+	Eligible                      bool       `json:"eligible"`
+	Blockers                      []string   `json:"blockers"`
+	Stage                         string     `json:"stage"`
+	RequiredEvidenceTypes         []string   `json:"required_evidence_types"`
+	MissingEvidenceTypes          []string   `json:"missing_evidence_types"`
+	RequiredApprovalsCount        int        `json:"required_approvals_count"`
+	ApprovedCount                 int        `json:"approved_count"`
+	MostRecentDecisionIsRejection bool       `json:"most_recent_decision_is_rejection"`
+	CurrentCandidateID            *uuid.UUID `json:"current_candidate_id,omitempty"`
 }
 
 type Service struct {
-	pool      *pgxpool.Pool
-	releases  *releases.Store
-	evidence  *evidence.Store
-	approvals *approvals.Store
-	projects  *projects.Store
+	pool       *pgxpool.Pool
+	releases   *releases.Store
+	evidence   *evidence.Store
+	approvals  *approvals.Store
+	projects   *projects.Store
+	candidates *candidates.Store
 }
 
-func NewService(pool *pgxpool.Pool, releasesStore *releases.Store, evidenceStore *evidence.Store, approvalsStore *approvals.Store, projectsStore *projects.Store) *Service {
-	return &Service{pool: pool, releases: releasesStore, evidence: evidenceStore, approvals: approvalsStore, projects: projectsStore}
+func NewService(pool *pgxpool.Pool, releasesStore *releases.Store, evidenceStore *evidence.Store, approvalsStore *approvals.Store, projectsStore *projects.Store, candidatesStore *candidates.Store) *Service {
+	return &Service{pool: pool, releases: releasesStore, evidence: evidenceStore, approvals: approvalsStore, projects: projectsStore, candidates: candidatesStore}
 }
 
 // Evaluate computes production eligibility for one release. It performs
@@ -64,6 +67,10 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
+	currentCandidate, err := s.candidates.GetCurrentByRelease(ctx, s.pool, releaseID)
+	if err != nil {
+		return Result{}, err
+	}
 
 	var blockers []string
 
@@ -79,6 +86,29 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 	}
 	for _, t := range missing {
 		blockers = append(blockers, "missing required evidence: "+t)
+	}
+
+	// When a project requires approvals to be bound to a specific
+	// candidate, an approval decided against any candidate other than the
+	// current one (or decided before any candidate existed) silently
+	// stops counting — this is what forces revalidation after the
+	// artifact changes, with no separate "invalidate" step needed. See
+	// docs/architecture-audit.md Finding 2.
+	var candidateID *uuid.UUID
+	if currentCandidate != nil {
+		candidateID = &currentCandidate.ID
+	}
+	if policy.RequireCandidateForApproval {
+		if currentCandidate == nil {
+			blockers = append(blockers, "project policy requires a release candidate to be registered before approvals count, but none has been registered for this release")
+		}
+		filtered := latest[:0]
+		for _, a := range latest {
+			if currentCandidate != nil && a.CandidateID != nil && *a.CandidateID == currentCandidate.ID {
+				filtered = append(filtered, a)
+			}
+		}
+		latest = filtered
 	}
 
 	approvedCount := 0
@@ -111,5 +141,6 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		RequiredApprovalsCount:        policy.RequiredApprovalsCount,
 		ApprovedCount:                 approvedCount,
 		MostRecentDecisionIsRejection: mostRecentIsRejection,
+		CurrentCandidateID:            candidateID,
 	}, nil
 }

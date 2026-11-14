@@ -121,6 +121,23 @@ func (s *Service) IssueAuthorization(ctx context.Context, identity authn.Identit
 		return Authorization{}, "", httpx.Conflict("release is not eligible for production deployment").WithDetails(result)
 	}
 
+	// If a release candidate has been registered, the digest being
+	// authorized must be the one on record — this is what stops an
+	// authorization (and therefore a production deployment) from ever
+	// covering a different artifact than the one tracked as this
+	// release's current build, regardless of whether the project policy
+	// also requires candidate-bound approvals. See
+	// docs/architecture-audit.md Finding 2.
+	current, err := s.candidates.GetCurrentByRelease(ctx, s.pool, rel.ID)
+	if err != nil {
+		return Authorization{}, "", err
+	}
+	if current != nil && current.ImageDigest != artifactDigest {
+		return Authorization{}, "", httpx.Conflict("artifact_digest does not match this release's current candidate").WithDetails(map[string]string{
+			"requested_digest": artifactDigest, "candidate_digest": current.ImageDigest,
+		})
+	}
+
 	token, err := generateAuthToken()
 	if err != nil {
 		return Authorization{}, "", err

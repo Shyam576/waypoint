@@ -10,6 +10,7 @@ import (
 	"github.com/Shyam576/waypoint/internal/approvals"
 	"github.com/Shyam576/waypoint/internal/audit"
 	"github.com/Shyam576/waypoint/internal/authn"
+	"github.com/Shyam576/waypoint/internal/candidates"
 	"github.com/Shyam576/waypoint/internal/config"
 	"github.com/Shyam576/waypoint/internal/deployments"
 	"github.com/Shyam576/waypoint/internal/evidence"
@@ -61,6 +62,10 @@ type Server struct {
 	MCPNotesStore    *mcpnotes.Store
 	MCPNotesHandlers *mcpnotes.Handlers
 
+	Candidates         *candidates.Service
+	CandidatesStore    *candidates.Store
+	CandidatesHandlers *candidates.Handlers
+
 	Dashboard *DashboardService
 }
 
@@ -88,15 +93,19 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Server {
 	evidenceSvc := evidence.NewService(pool, evidenceStore, auditStore, releasesSvc)
 	evidenceHandlers := evidence.NewHandlers(evidenceSvc)
 
+	candidatesStore := candidates.NewStore()
+	candidatesSvc := candidates.NewService(pool, candidatesStore, auditStore, releasesStore, releasesSvc)
+	candidatesHandlers := candidates.NewHandlers(candidatesSvc)
+
 	approvalsStore := approvals.NewStore()
-	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc)
+	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc, candidatesStore)
 	approvalsHandlers := approvals.NewHandlers(approvalsSvc)
 
-	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore)
+	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore, candidatesStore)
 	gateHandlers := gate.NewHandlers(gateSvc, releasesSvc)
 
 	deploymentsStore := deployments.NewStore()
-	deploymentsSvc := deployments.NewService(pool, deploymentsStore, auditStore, gateSvc, releasesStore, releasesSvc, releasesSvc, projectsSvc, cfg.DeployAuthTTL)
+	deploymentsSvc := deployments.NewService(pool, deploymentsStore, auditStore, gateSvc, releasesStore, releasesSvc, releasesSvc, projectsSvc, candidatesStore, cfg.DeployAuthTTL)
 	deploymentsHandlers := deployments.NewHandlers(deploymentsSvc)
 
 	supportStore := support.NewStore()
@@ -121,6 +130,7 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Server {
 		Deployments: deploymentsSvc, DeploymentsStore: deploymentsStore, DeploymentsHandlers: deploymentsHandlers,
 		Support: supportSvc, SupportStore: supportStore, SupportHandlers: supportHandlers,
 		MCPNotes: mcpNotesSvc, MCPNotesStore: mcpNotesStore, MCPNotesHandlers: mcpNotesHandlers,
+		Candidates: candidatesSvc, CandidatesStore: candidatesStore, CandidatesHandlers: candidatesHandlers,
 		Dashboard: dashboard,
 	}
 }

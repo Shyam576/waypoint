@@ -15,6 +15,7 @@ import (
 
 	"github.com/Shyam576/waypoint/internal/audit"
 	"github.com/Shyam576/waypoint/internal/authn"
+	"github.com/Shyam576/waypoint/internal/candidates"
 	"github.com/Shyam576/waypoint/internal/dbx"
 	"github.com/Shyam576/waypoint/internal/gate"
 	"github.com/Shyam576/waypoint/internal/httpx"
@@ -167,14 +168,15 @@ type Service struct {
 	promoter   ReleasePromoter
 	releaseAcc ReleaseAccess
 	projects   ProjectAccess
+	candidates *candidates.Store
 	authTTL    time.Duration
 }
 
 // NewService wires a deployments Service. authTTL bounds how long a
 // minted deployment authorization (see authorization.go) stays valid
 // before it must be re-issued; it has no effect on anything else.
-func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, gateSvc *gate.Service, releasesStore *releases.Store, promoter ReleasePromoter, releaseAccess ReleaseAccess, projectAccess ProjectAccess, authTTL time.Duration) *Service {
-	return &Service{pool: pool, store: store, audit: auditStore, gate: gateSvc, releases: releasesStore, promoter: promoter, releaseAcc: releaseAccess, projects: projectAccess, authTTL: authTTL}
+func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, gateSvc *gate.Service, releasesStore *releases.Store, promoter ReleasePromoter, releaseAccess ReleaseAccess, projectAccess ProjectAccess, candidatesStore *candidates.Store, authTTL time.Duration) *Service {
+	return &Service{pool: pool, store: store, audit: auditStore, gate: gateSvc, releases: releasesStore, promoter: promoter, releaseAcc: releaseAccess, projects: projectAccess, candidates: candidatesStore, authTTL: authTTL}
 }
 
 type RecordInput struct {

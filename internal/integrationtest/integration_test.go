@@ -23,6 +23,7 @@ import (
 	"github.com/Shyam576/waypoint/internal/approvals"
 	"github.com/Shyam576/waypoint/internal/audit"
 	"github.com/Shyam576/waypoint/internal/authn"
+	"github.com/Shyam576/waypoint/internal/candidates"
 	"github.com/Shyam576/waypoint/internal/dbx"
 	"github.com/Shyam576/waypoint/internal/deployments"
 	"github.com/Shyam576/waypoint/internal/evidence"
@@ -61,6 +62,7 @@ type harness struct {
 	projectsSvc    *projects.Service
 	releasesSvc    *releases.Service
 	evidenceSvc    *evidence.Service
+	candidatesSvc  *candidates.Service
 	approvalsSvc   *approvals.Service
 	gateSvc        *gate.Service
 	deploymentsSvc *deployments.Service
@@ -79,11 +81,13 @@ func newHarness(pool *pgxpool.Pool) *harness {
 	releasesSvc := releases.NewService(pool, releasesStore, auditStore, projectsSvc)
 	evidenceStore := evidence.NewStore()
 	evidenceSvc := evidence.NewService(pool, evidenceStore, auditStore, releasesSvc)
+	candidatesStore := candidates.NewStore()
+	candidatesSvc := candidates.NewService(pool, candidatesStore, auditStore, releasesStore, releasesSvc)
 	approvalsStore := approvals.NewStore()
-	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc)
-	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore)
+	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc, candidatesStore)
+	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore, candidatesStore)
 	deploymentsStore := deployments.NewStore()
-	deploymentsSvc := deployments.NewService(pool, deploymentsStore, auditStore, gateSvc, releasesStore, releasesSvc, releasesSvc, projectsSvc, 15*time.Minute)
+	deploymentsSvc := deployments.NewService(pool, deploymentsStore, auditStore, gateSvc, releasesStore, releasesSvc, releasesSvc, projectsSvc, candidatesStore, 15*time.Minute)
 	supportStore := support.NewStore()
 	supportSvc := support.NewService(pool, supportStore, auditStore, releasesSvc)
 	mcpNotesStore := mcpnotes.NewStore()
@@ -91,7 +95,7 @@ func newHarness(pool *pgxpool.Pool) *harness {
 
 	return &harness{
 		pool: pool, usersStore: usersStore, authSvc: authSvc, projectsSvc: projectsSvc, releasesSvc: releasesSvc,
-		evidenceSvc: evidenceSvc, approvalsSvc: approvalsSvc, gateSvc: gateSvc,
+		evidenceSvc: evidenceSvc, candidatesSvc: candidatesSvc, approvalsSvc: approvalsSvc, gateSvc: gateSvc,
 		deploymentsSvc: deploymentsSvc, supportSvc: supportSvc, mcpNotesSvc: mcpNotesSvc,
 	}
 }
@@ -513,7 +517,7 @@ func TestDeploymentAuthorizationExpires(t *testing.T) {
 	// A harness-local deployments service with a near-zero authorization
 	// TTL, so the token is already expired by the time we try to use it,
 	// without the test needing to sleep for a realistic TTL.
-	shortTTLSvc := deployments.NewService(h.pool, deployments.NewStore(), audit.NewStore(), h.gateSvc, releases.NewStore(), h.releasesSvc, h.releasesSvc, h.projectsSvc, time.Nanosecond)
+	shortTTLSvc := deployments.NewService(h.pool, deployments.NewStore(), audit.NewStore(), h.gateSvc, releases.NewStore(), h.releasesSvc, h.releasesSvc, h.projectsSvc, candidates.NewStore(), time.Nanosecond)
 	ciIdentity := h.issueCIIdentity(t, ctx, admin, proj.ID)
 
 	_, authToken, err := shortTTLSvc.IssueAuthorization(ctx, ciIdentity, rel.ID, "sha256:expired")
@@ -588,5 +592,126 @@ func TestMCPSubmissionAcceptMaterializesRejectDoesNot(t *testing.T) {
 
 	if _, err := h.mcpNotesSvc.Accept(ctx, dev, sub.ID, ""); err == nil {
 		t.Error("expected accepting an already-reviewed submission to fail")
+	}
+}
+
+func TestDeploymentAuthorizationRequiresMatchingCandidateDigest(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence: %v", err)
+		}
+	}
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	if _, err := h.candidatesSvc.RegisterFromWeb(ctx, dev, rel.ID, candidates.RegisterInput{CommitSHA: "abc123", ImageDigest: "sha256:candidate-digest"}); err != nil {
+		t.Fatalf("register candidate: %v", err)
+	}
+	ciIdentity := h.issueCIIdentity(t, ctx, admin, proj.ID)
+
+	// A registered candidate exists: minting an authorization for a
+	// different digest must be rejected even though the release is
+	// otherwise eligible.
+	if _, _, err := h.deploymentsSvc.IssueAuthorization(ctx, ciIdentity, rel.ID, "sha256:some-other-digest"); err == nil {
+		t.Error("expected an authorization request for a digest that doesn't match the registered candidate to be rejected")
+	}
+
+	// The candidate's own digest is authorized normally.
+	if _, _, err := h.deploymentsSvc.IssueAuthorization(ctx, ciIdentity, rel.ID, "sha256:candidate-digest"); err != nil {
+		t.Errorf("expected an authorization request matching the registered candidate's digest to succeed: %v", err)
+	}
+}
+
+func TestGateRequiresCandidateMatchingApprovalWhenPolicyEnabled(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+
+	policy, err := h.projectsSvc.GetPolicy(ctx, admin, proj.ID)
+	if err != nil {
+		t.Fatalf("get policy: %v", err)
+	}
+	if _, err := h.projectsSvc.UpdatePolicy(ctx, admin, proj.ID, projects.UpdatePolicyInput{
+		RequiredEvidenceTypes: policy.RequiredEvidenceTypes, RequiredApprovalsCount: policy.RequiredApprovalsCount,
+		BlockOnOpenRejection: policy.BlockOnOpenRejection, RequireCandidateForApproval: true,
+	}); err != nil {
+		t.Fatalf("enable require_candidate_for_approval: %v", err)
+	}
+
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence: %v", err)
+		}
+	}
+
+	// No candidate registered yet and the policy requires one: the gate
+	// must block with a clear reason, even with a satisfied approval
+	// count requirement about to be met.
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	result, err := h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if result.Eligible {
+		t.Fatal("expected the gate to block when no candidate is registered but policy requires one")
+	}
+
+	// Register the candidate the approval above did NOT see (it predates
+	// the candidate), so it must not count.
+	if _, err := h.candidatesSvc.RegisterFromWeb(ctx, dev, rel.ID, candidates.RegisterInput{ImageDigest: "sha256:v1"}); err != nil {
+		t.Fatalf("register candidate v1: %v", err)
+	}
+	result, err = h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if result.Eligible {
+		t.Fatal("expected the gate to still block: the only approval predates the candidate and must not count")
+	}
+
+	// Approve again now that a candidate exists: this decision is stamped
+	// with the current candidate and should satisfy the gate.
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "go, now that there's a candidate"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	result, err = h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !result.Eligible {
+		t.Fatalf("expected the gate to be eligible once approved against the current candidate, blockers: %v", result.Blockers)
+	}
+
+	// Registering a NEW candidate (the artifact changed) must silently
+	// drop the old approval from the count without any separate
+	// invalidation step: this is the revalidation-after-change guarantee.
+	if _, err := h.candidatesSvc.RegisterFromWeb(ctx, dev, rel.ID, candidates.RegisterInput{ImageDigest: "sha256:v2"}); err != nil {
+		t.Fatalf("register candidate v2: %v", err)
+	}
+	result, err = h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if result.Eligible {
+		t.Fatal("expected changing the candidate to invalidate the prior approval and re-block the gate")
+	}
+	if result.ApprovedCount != 0 {
+		t.Errorf("expected 0 approvals to count against the new candidate, got %d", result.ApprovedCount)
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/Shyam576/waypoint/internal/audit"
 	"github.com/Shyam576/waypoint/internal/authn"
+	"github.com/Shyam576/waypoint/internal/candidates"
 	"github.com/Shyam576/waypoint/internal/dbx"
 	"github.com/Shyam576/waypoint/internal/httpx"
 	"github.com/Shyam576/waypoint/internal/releases"
@@ -32,32 +33,38 @@ func (d Decision) Valid() bool {
 }
 
 type Approval struct {
-	ID         uuid.UUID `json:"id"`
-	ReleaseID  uuid.UUID `json:"release_id"`
-	ApproverID uuid.UUID `json:"approver_id"`
-	Decision   Decision  `json:"decision"`
-	Comment    string    `json:"comment"`
-	DecidedAt  time.Time `json:"decided_at"`
+	ID          uuid.UUID  `json:"id"`
+	ReleaseID   uuid.UUID  `json:"release_id"`
+	ApproverID  uuid.UUID  `json:"approver_id"`
+	Decision    Decision   `json:"decision"`
+	Comment     string     `json:"comment"`
+	CandidateID *uuid.UUID `json:"candidate_id,omitempty"`
+	DecidedAt   time.Time  `json:"decided_at"`
 }
 
 type Store struct{}
 
 func NewStore() *Store { return &Store{} }
 
-func (s *Store) Create(ctx context.Context, q dbx.Querier, releaseID, approverID uuid.UUID, decision Decision, comment string) (Approval, error) {
+// Create records one approve/reject decision. candidateID is the
+// release's current candidate (see internal/candidates) at the moment of
+// decision, or nil if the release has no registered candidate — it is
+// bookkeeping only here; internal/gate decides whether a mismatch
+// matters, per project policy.
+func (s *Store) Create(ctx context.Context, q dbx.Querier, releaseID, approverID uuid.UUID, decision Decision, comment string, candidateID *uuid.UUID) (Approval, error) {
 	var a Approval
 	err := q.QueryRow(ctx, `
-		INSERT INTO approvals (release_id, approver_id, decision, comment)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, release_id, approver_id, decision, comment, decided_at`,
-		releaseID, approverID, decision, comment,
-	).Scan(&a.ID, &a.ReleaseID, &a.ApproverID, &a.Decision, &a.Comment, &a.DecidedAt)
+		INSERT INTO approvals (release_id, approver_id, decision, comment, candidate_id)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, release_id, approver_id, decision, comment, candidate_id, decided_at`,
+		releaseID, approverID, decision, comment, candidateID,
+	).Scan(&a.ID, &a.ReleaseID, &a.ApproverID, &a.Decision, &a.Comment, &a.CandidateID, &a.DecidedAt)
 	return a, err
 }
 
 func (s *Store) ListByRelease(ctx context.Context, q dbx.Querier, releaseID uuid.UUID) ([]Approval, error) {
 	rows, err := q.Query(ctx, `
-		SELECT id, release_id, approver_id, decision, comment, decided_at
+		SELECT id, release_id, approver_id, decision, comment, candidate_id, decided_at
 		FROM approvals WHERE release_id = $1 ORDER BY decided_at DESC`, releaseID)
 	if err != nil {
 		return nil, err
@@ -66,7 +73,7 @@ func (s *Store) ListByRelease(ctx context.Context, q dbx.Querier, releaseID uuid
 	out := []Approval{}
 	for rows.Next() {
 		var a Approval
-		if err := rows.Scan(&a.ID, &a.ReleaseID, &a.ApproverID, &a.Decision, &a.Comment, &a.DecidedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.ReleaseID, &a.ApproverID, &a.Decision, &a.Comment, &a.CandidateID, &a.DecidedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -79,7 +86,7 @@ func (s *Store) ListByRelease(ctx context.Context, q dbx.Querier, releaseID uuid
 // production gate uses to count current approvals.
 func (s *Store) LatestPerApprover(ctx context.Context, q dbx.Querier, releaseID uuid.UUID) ([]Approval, error) {
 	rows, err := q.Query(ctx, `
-		SELECT DISTINCT ON (approver_id) id, release_id, approver_id, decision, comment, decided_at
+		SELECT DISTINCT ON (approver_id) id, release_id, approver_id, decision, comment, candidate_id, decided_at
 		FROM approvals WHERE release_id = $1
 		ORDER BY approver_id, decided_at DESC`, releaseID)
 	if err != nil {
@@ -89,7 +96,7 @@ func (s *Store) LatestPerApprover(ctx context.Context, q dbx.Querier, releaseID 
 	out := []Approval{}
 	for rows.Next() {
 		var a Approval
-		if err := rows.Scan(&a.ID, &a.ReleaseID, &a.ApproverID, &a.Decision, &a.Comment, &a.DecidedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.ReleaseID, &a.ApproverID, &a.Decision, &a.Comment, &a.CandidateID, &a.DecidedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -106,15 +113,16 @@ type ProjectAccess interface {
 }
 
 type Service struct {
-	pool     *pgxpool.Pool
-	store    *Store
-	audit    *audit.Store
-	releases ReleaseAccess
-	projects ProjectAccess
+	pool       *pgxpool.Pool
+	store      *Store
+	audit      *audit.Store
+	releases   ReleaseAccess
+	projects   ProjectAccess
+	candidates *candidates.Store
 }
 
-func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, releaseAccess ReleaseAccess, projectAccess ProjectAccess) *Service {
-	return &Service{pool: pool, store: store, audit: auditStore, releases: releaseAccess, projects: projectAccess}
+func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, releaseAccess ReleaseAccess, projectAccess ProjectAccess, candidatesStore *candidates.Store) *Service {
+	return &Service{pool: pool, store: store, audit: auditStore, releases: releaseAccess, projects: projectAccess, candidates: candidatesStore}
 }
 
 // Decide records one approve/reject decision. It enforces, on the
@@ -145,13 +153,22 @@ func (s *Service) Decide(ctx context.Context, identity authn.Identity, releaseID
 		}
 	}
 
+	current, err := s.candidates.GetCurrentByRelease(ctx, s.pool, releaseID)
+	if err != nil {
+		return Approval{}, err
+	}
+	var candidateID *uuid.UUID
+	if current != nil {
+		candidateID = &current.ID
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Approval{}, err
 	}
 	defer tx.Rollback(ctx)
 
-	a, err := s.store.Create(ctx, tx, releaseID, identity.User.ID, decision, comment)
+	a, err := s.store.Create(ctx, tx, releaseID, identity.User.ID, decision, comment, candidateID)
 	if err != nil {
 		return Approval{}, err
 	}

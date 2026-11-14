@@ -9,6 +9,7 @@ import (
 	"github.com/Shyam576/waypoint/internal/approvals"
 	"github.com/Shyam576/waypoint/internal/audit"
 	"github.com/Shyam576/waypoint/internal/authn"
+	"github.com/Shyam576/waypoint/internal/candidates"
 	"github.com/Shyam576/waypoint/internal/deployments"
 	"github.com/Shyam576/waypoint/internal/evidence"
 	"github.com/Shyam576/waypoint/internal/gate"
@@ -24,6 +25,7 @@ import (
 type ReleaseDetail struct {
 	Release         releases.Release          `json:"release"`
 	Links           []releases.Link           `json:"links"`
+	Candidates      []candidates.Candidate    `json:"candidates"`
 	Evidence        []evidence.Evidence       `json:"evidence"`
 	ChangeNotes     []mcpnotes.ChangeNote     `json:"change_notes"`
 	DesignDecisions []mcpnotes.DesignDecision `json:"design_decisions"`
@@ -54,6 +56,11 @@ func (s *Server) releaseDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	links, err := s.ReleasesStore.ListLinks(r.Context(), s.Pool, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	cands, err := s.CandidatesStore.ListByRelease(r.Context(), s.Pool, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -106,7 +113,7 @@ func (s *Server) releaseDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.JSON(w, http.StatusOK, ReleaseDetail{
-		Release: rel, Links: nonNilLinks(links), Evidence: nonNilEvidence(ev),
+		Release: rel, Links: nonNilLinks(links), Candidates: nonNilCandidates(cands), Evidence: nonNilEvidence(ev),
 		ChangeNotes: nonNilChangeNotes(changeNotes), DesignDecisions: nonNilDesignDecisions(designDecisions),
 		Approvals: nonNilApprovals(apprs), Deployments: nonNilDeployments(deps), SupportItems: nonNilSupport(supportItems),
 		PendingMCP: nonNilSubmissions(pending), Eligibility: eligibility, Activity: nonNilActivity(activity),
@@ -122,6 +129,12 @@ func nonNilLinks(v []releases.Link) []releases.Link {
 func nonNilEvidence(v []evidence.Evidence) []evidence.Evidence {
 	if v == nil {
 		return []evidence.Evidence{}
+	}
+	return v
+}
+func nonNilCandidates(v []candidates.Candidate) []candidates.Candidate {
+	if v == nil {
+		return []candidates.Candidate{}
 	}
 	return v
 }

@@ -88,6 +88,9 @@ func (s *Server) Router() http.Handler {
 			web.Post("/releases/{releaseID}/evidence", s.EvidenceHandlers.Submit)
 			web.Get("/releases/{releaseID}/evidence", s.EvidenceHandlers.ListByRelease)
 
+			web.Post("/releases/{releaseID}/candidates", s.CandidatesHandlers.RegisterFromWeb)
+			web.Get("/releases/{releaseID}/candidates", s.CandidatesHandlers.ListByRelease)
+
 			web.Post("/releases/{releaseID}/approvals", s.ApprovalsHandlers.Decide)
 			web.Get("/releases/{releaseID}/approvals", s.ApprovalsHandlers.ListByRelease)
 
@@ -122,6 +125,7 @@ func (s *Server) Router() http.Handler {
 		api.Group(func(ci chi.Router) {
 			ci.Use(requireCI)
 			ci.Get("/ci/releases/{releaseID}/eligibility", s.DeploymentsHandlers.EligibilityForCI)
+			ci.Post("/ci/releases/{releaseID}/candidates", s.CandidatesHandlers.RegisterFromCI)
 			ci.Post("/ci/releases/{releaseID}/deployment-authorizations", s.DeploymentsHandlers.IssueAuthorization)
 			ci.Post("/ci/releases/{releaseID}/deployments", s.DeploymentsHandlers.RecordFromCI)
 		})
