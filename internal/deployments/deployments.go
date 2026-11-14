@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Shyam576/waypoint/internal/audit"
@@ -92,29 +93,40 @@ type CreateParams struct {
 	OccurredAt          time.Time
 }
 
-func (s *Store) Create(ctx context.Context, q dbx.Querier, p CreateParams) (Deployment, error) {
+const deploymentColumns = `id, release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, authorization_id, occurred_at, created_at`
+
+func scanDeployment(row pgx.Row) (Deployment, error) {
 	var d Deployment
-	err := q.QueryRow(ctx, `
-		INSERT INTO deployments (release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, authorization_id, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		RETURNING id, release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, authorization_id, occurred_at, created_at`,
-		p.ReleaseID, p.Environment, p.ArtifactDigest, p.ArtifactRef, p.CommitSHA, p.WorkflowRunURL, p.Result, p.RecordedVia, p.RecordedBy, p.RecordedByCITokenID, p.AuthorizationID, p.OccurredAt,
-	).Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL, &d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.AuthorizationID, &d.OccurredAt, &d.CreatedAt)
+	err := row.Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL,
+		&d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.AuthorizationID, &d.OccurredAt, &d.CreatedAt)
 	return d, err
 }
 
+func (s *Store) Create(ctx context.Context, q dbx.Querier, p CreateParams) (Deployment, error) {
+	row := q.QueryRow(ctx, `
+		INSERT INTO deployments (release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, authorization_id, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING `+deploymentColumns,
+		p.ReleaseID, p.Environment, p.ArtifactDigest, p.ArtifactRef, p.CommitSHA, p.WorkflowRunURL, p.Result, p.RecordedVia, p.RecordedBy, p.RecordedByCITokenID, p.AuthorizationID, p.OccurredAt,
+	)
+	return scanDeployment(row)
+}
+
+func (s *Store) GetByID(ctx context.Context, q dbx.Querier, id uuid.UUID) (Deployment, error) {
+	row := q.QueryRow(ctx, `SELECT `+deploymentColumns+` FROM deployments WHERE id = $1`, id)
+	return scanDeployment(row)
+}
+
 func (s *Store) ListByRelease(ctx context.Context, q dbx.Querier, releaseID uuid.UUID) ([]Deployment, error) {
-	rows, err := q.Query(ctx, `
-		SELECT id, release_id, environment, artifact_digest, artifact_ref, commit_sha, workflow_run_url, result, recorded_via, recorded_by, recorded_by_ci_token_id, authorization_id, occurred_at, created_at
-		FROM deployments WHERE release_id = $1 ORDER BY occurred_at DESC`, releaseID)
+	rows, err := q.Query(ctx, `SELECT `+deploymentColumns+` FROM deployments WHERE release_id = $1 ORDER BY occurred_at DESC`, releaseID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []Deployment{}
 	for rows.Next() {
-		var d Deployment
-		if err := rows.Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL, &d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.AuthorizationID, &d.OccurredAt, &d.CreatedAt); err != nil {
+		d, err := scanDeployment(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -138,8 +150,8 @@ func (s *Store) ListRecent(ctx context.Context, q dbx.Querier, projectIDs []uuid
 	defer rows.Close()
 	out := []Deployment{}
 	for rows.Next() {
-		var d Deployment
-		if err := rows.Scan(&d.ID, &d.ReleaseID, &d.Environment, &d.ArtifactDigest, &d.ArtifactRef, &d.CommitSHA, &d.WorkflowRunURL, &d.Result, &d.RecordedVia, &d.RecordedBy, &d.RecordedByCITokenID, &d.AuthorizationID, &d.OccurredAt, &d.CreatedAt); err != nil {
+		d, err := scanDeployment(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -277,26 +289,27 @@ func (s *Service) record(ctx context.Context, identity authn.Identity, rel relea
 	}
 	defer tx.Rollback(ctx)
 
-	// The gate re-check happens inside this transaction, after taking a
-	// row lock on the release, so a concurrent approval/policy change
-	// cannot land in the gap between "the gate said eligible" and "the
-	// deployment got recorded" — see docs/architecture-audit.md Finding
-	// 11. A failed check here still just returns; the deferred
+	// A row lock on the release is taken inside this transaction before
+	// anything else, so a concurrent approval/policy change cannot land
+	// in the gap between "the gate said eligible" and "the deployment
+	// got recorded" — see docs/architecture-audit.md Finding 11. A
+	// failed check anywhere below still just returns; the deferred
 	// rollback above discards the lock and anything else done so far.
 	if in.Environment == EnvProduction {
 		if err := s.releases.LockForUpdate(ctx, tx, rel.ID); err != nil {
 			return Deployment{}, err
 		}
-		result, err := s.gate.EvaluateTx(ctx, tx, rel.ID)
-		if err != nil {
-			return Deployment{}, err
-		}
-		if !result.Eligible {
-			return Deployment{}, httpx.Conflict("release is not eligible for production deployment").WithDetails(result)
-		}
 	}
 
+	// Authorization is consumed before the gate re-check (not after) so
+	// that a rollback-linked authorization (see rollback.go) can be
+	// detected here and substituted for the normal gate check below.
+	// Consuming inside this same transaction keeps the safety property
+	// documented on ConsumeAuthorization: if anything after this point
+	// fails, the deferred rollback undoes the consumption too, so a
+	// token is never burned by a failed attempt.
 	var authorizationID *uuid.UUID
+	var consumedAuth Authorization
 	if requireAuthorization(via, in.Environment) {
 		auth, err := s.store.ConsumeAuthorization(ctx, tx, hashAuthToken(in.DeploymentAuthorization))
 		if err != nil {
@@ -309,6 +322,22 @@ func (s *Service) record(ctx context.Context, identity authn.Identity, rel relea
 			return Deployment{}, httpx.Forbidden("deployment authorization does not match the artifact_digest being recorded")
 		}
 		authorizationID = &auth.ID
+		consumedAuth = auth
+	}
+
+	// A rollback authorization substitutes its own provenance check
+	// (done up front in InitiateRollback: the target must already have
+	// been a prior successful production deployment) for the normal
+	// gate re-check. Every other production deployment still re-runs
+	// the gate here, with no exceptions.
+	if in.Environment == EnvProduction && consumedAuth.RollbackID == nil {
+		result, err := s.gate.EvaluateTx(ctx, tx, rel.ID)
+		if err != nil {
+			return Deployment{}, err
+		}
+		if !result.Eligible {
+			return Deployment{}, httpx.Conflict("release is not eligible for production deployment").WithDetails(result)
+		}
 	}
 
 	d, err := s.store.Create(ctx, tx, CreateParams{
@@ -326,6 +355,16 @@ func (s *Service) record(ctx context.Context, identity authn.Identity, rel relea
 	}
 	if err := s.audit.Record(ctx, tx, "release", rel.ID, "deployment_recorded", identity.AuditActor(), nil, d, ""); err != nil {
 		return Deployment{}, err
+	}
+
+	if consumedAuth.RollbackID != nil {
+		rb, err := s.store.MarkRollbackResult(ctx, tx, *consumedAuth.RollbackID, in.Result, d.ID)
+		if err != nil {
+			return Deployment{}, err
+		}
+		if err := s.audit.Record(ctx, tx, "release", rel.ID, "rollback_result_recorded", identity.AuditActor(), nil, rb, ""); err != nil {
+			return Deployment{}, err
+		}
 	}
 
 	if in.Environment == EnvProduction && in.Result == ResultSuccess && rel.Stage != releases.StageProduction {

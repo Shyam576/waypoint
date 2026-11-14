@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Shyam576/waypoint/internal/authn"
 	"github.com/Shyam576/waypoint/internal/dbx"
@@ -25,14 +26,23 @@ import (
 // never authorize a second deployment, and it expires on its own if
 // never used. See docs/architecture-audit.md Finding 1.
 type Authorization struct {
-	ID                uuid.UUID  `json:"id"`
-	ReleaseID         uuid.UUID  `json:"release_id"`
-	ArtifactDigest    string     `json:"artifact_digest"`
-	IssuedByCITokenID uuid.UUID  `json:"-"`
+	ID             uuid.UUID `json:"id"`
+	ReleaseID      uuid.UUID `json:"release_id"`
+	ArtifactDigest string    `json:"artifact_digest"`
+	// IssuedByCITokenID is nil for a rollback authorization (see
+	// RollbackID below), which is minted by a human admin/coordinator
+	// from the web app rather than by a CI token.
+	IssuedByCITokenID *uuid.UUID `json:"-"`
 	IssuedAt          time.Time  `json:"issued_at"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	ConsumedAt        *time.Time `json:"consumed_at,omitempty"`
 	RevokedAt         *time.Time `json:"revoked_at,omitempty"`
+	// RollbackID is set when this authorization was minted by
+	// InitiateRollback (see rollback.go) instead of the normal
+	// IssueAuthorization path. record() uses it to skip the normal gate
+	// re-check (a rollback has its own provenance check instead) and to
+	// update the rollback's status as a side effect of consuming it.
+	RollbackID *uuid.UUID `json:"rollback_id,omitempty"`
 }
 
 func generateAuthToken() (string, error) {
@@ -48,15 +58,36 @@ func hashAuthToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *Store) CreateAuthorization(ctx context.Context, q dbx.Querier, releaseID uuid.UUID, artifactDigest string, ciTokenID uuid.UUID, tokenHash string, expiresAt time.Time) (Authorization, error) {
+const authorizationColumns = `id, release_id, artifact_digest, issued_by_ci_token_id, issued_at, expires_at, consumed_at, revoked_at, rollback_id`
+
+func scanAuthorization(row pgx.Row) (Authorization, error) {
 	var a Authorization
-	err := q.QueryRow(ctx, `
-		INSERT INTO deployment_authorizations (release_id, artifact_digest, token_hash, issued_by_ci_token_id, expires_at)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, release_id, artifact_digest, issued_by_ci_token_id, issued_at, expires_at, consumed_at, revoked_at`,
-		releaseID, artifactDigest, tokenHash, ciTokenID, expiresAt,
-	).Scan(&a.ID, &a.ReleaseID, &a.ArtifactDigest, &a.IssuedByCITokenID, &a.IssuedAt, &a.ExpiresAt, &a.ConsumedAt, &a.RevokedAt)
+	err := row.Scan(&a.ID, &a.ReleaseID, &a.ArtifactDigest, &a.IssuedByCITokenID, &a.IssuedAt, &a.ExpiresAt, &a.ConsumedAt, &a.RevokedAt, &a.RollbackID)
 	return a, err
+}
+
+func (s *Store) CreateAuthorization(ctx context.Context, q dbx.Querier, releaseID uuid.UUID, artifactDigest string, ciTokenID uuid.UUID, tokenHash string, expiresAt time.Time) (Authorization, error) {
+	return s.createAuthorization(ctx, q, releaseID, artifactDigest, &ciTokenID, tokenHash, expiresAt, nil)
+}
+
+// CreateRollbackAuthorization is CreateAuthorization, but linking the
+// minted authorization to the rollback it was issued for (see
+// rollback.go's InitiateRollback) instead of going through the normal
+// gate-checked path. It has no CI token of its own — it is minted by a
+// human admin/coordinator from the web app — so issued_by_ci_token_id
+// is left NULL; the rollback_id is what makes it traceable instead.
+func (s *Store) CreateRollbackAuthorization(ctx context.Context, q dbx.Querier, releaseID uuid.UUID, artifactDigest string, tokenHash string, expiresAt time.Time, rollbackID uuid.UUID) (Authorization, error) {
+	return s.createAuthorization(ctx, q, releaseID, artifactDigest, nil, tokenHash, expiresAt, &rollbackID)
+}
+
+func (s *Store) createAuthorization(ctx context.Context, q dbx.Querier, releaseID uuid.UUID, artifactDigest string, ciTokenID *uuid.UUID, tokenHash string, expiresAt time.Time, rollbackID *uuid.UUID) (Authorization, error) {
+	row := q.QueryRow(ctx, `
+		INSERT INTO deployment_authorizations (release_id, artifact_digest, token_hash, issued_by_ci_token_id, expires_at, rollback_id)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING `+authorizationColumns,
+		releaseID, artifactDigest, tokenHash, ciTokenID, expiresAt, rollbackID,
+	)
+	return scanAuthorization(row)
 }
 
 // ConsumeAuthorization atomically marks one authorization token as used,
@@ -70,15 +101,14 @@ func (s *Store) CreateAuthorization(ctx context.Context, q dbx.Querier, releaseI
 // authorizes, so a failed/rolled-back deployment attempt never burns the
 // token.
 func (s *Store) ConsumeAuthorization(ctx context.Context, q dbx.Querier, tokenHash string) (Authorization, error) {
-	var a Authorization
-	err := q.QueryRow(ctx, `
+	row := q.QueryRow(ctx, `
 		UPDATE deployment_authorizations
 		SET consumed_at = now()
 		WHERE token_hash = $1 AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at > now()
-		RETURNING id, release_id, artifact_digest, issued_by_ci_token_id, issued_at, expires_at, consumed_at, revoked_at`,
+		RETURNING `+authorizationColumns,
 		tokenHash,
-	).Scan(&a.ID, &a.ReleaseID, &a.ArtifactDigest, &a.IssuedByCITokenID, &a.IssuedAt, &a.ExpiresAt, &a.ConsumedAt, &a.RevokedAt)
-	return a, err
+	)
+	return scanAuthorization(row)
 }
 
 // resolveCIRelease is the shared "is this CI identity allowed to act on

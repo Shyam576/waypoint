@@ -166,3 +166,95 @@ func (h *Handlers) ListByRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, list)
 }
+
+type initiateRollbackRequest struct {
+	OriginalDeploymentID uuid.UUID `json:"original_deployment_id"`
+	TargetDeploymentID   uuid.UUID `json:"target_deployment_id"`
+	Reason               string    `json:"reason"`
+}
+
+// InitiateRollback handles
+// POST /api/v1/releases/{releaseID}/rollbacks for admins/release
+// coordinators. It mints a single-use deployment authorization token
+// (returned in the response) that CI must present to the normal
+// POST .../deployments endpoint to actually execute the rollback.
+func (h *Handlers) InitiateRollback(w http.ResponseWriter, r *http.Request) {
+	identity, ok := authn.IdentityFromContext(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("sign in required"))
+		return
+	}
+	releaseID, err := uuid.Parse(chi.URLParam(r, "releaseID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid releaseID"))
+		return
+	}
+	var req initiateRollbackRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	out, err := h.Svc.InitiateRollback(r.Context(), identity, releaseID, InitiateRollbackInput{
+		OriginalDeploymentID: req.OriginalDeploymentID, TargetDeploymentID: req.TargetDeploymentID, Reason: req.Reason,
+	})
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, out)
+}
+
+type verifyRollbackRequest struct {
+	Note string `json:"note"`
+}
+
+// VerifyRollback handles
+// POST /api/v1/releases/{releaseID}/rollbacks/{rollbackID}/verify.
+func (h *Handlers) VerifyRollback(w http.ResponseWriter, r *http.Request) {
+	identity, ok := authn.IdentityFromContext(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("sign in required"))
+		return
+	}
+	releaseID, err := uuid.Parse(chi.URLParam(r, "releaseID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid releaseID"))
+		return
+	}
+	rollbackID, err := uuid.Parse(chi.URLParam(r, "rollbackID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid rollbackID"))
+		return
+	}
+	var req verifyRollbackRequest
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	rb, err := h.Svc.VerifyRollback(r.Context(), identity, releaseID, rollbackID, req.Note)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, rb)
+}
+
+// ListRollbacksByRelease handles GET /api/v1/releases/{releaseID}/rollbacks.
+func (h *Handlers) ListRollbacksByRelease(w http.ResponseWriter, r *http.Request) {
+	identity, ok := authn.IdentityFromContext(r.Context())
+	if !ok {
+		httpx.Error(w, r, httpx.Unauthorized("sign in required"))
+		return
+	}
+	releaseID, err := uuid.Parse(chi.URLParam(r, "releaseID"))
+	if err != nil {
+		httpx.Error(w, r, httpx.BadRequest("invalid releaseID"))
+		return
+	}
+	list, err := h.Svc.ListRollbacksByRelease(r.Context(), identity, releaseID)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, list)
+}
