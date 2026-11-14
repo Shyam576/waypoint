@@ -145,17 +145,18 @@ func (s *Store) ListLinks(ctx context.Context, q dbx.Querier, releaseID uuid.UUI
 func (s *Store) UpsertPolicySnapshot(ctx context.Context, q dbx.Querier, releaseID uuid.UUID, in PolicySnapshotInput) (PolicySnapshot, error) {
 	var p PolicySnapshot
 	err := q.QueryRow(ctx, `
-		INSERT INTO release_policy_snapshots (release_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO release_policy_snapshots (release_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, require_checklist_completion)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (release_id) DO UPDATE SET
 			required_evidence_types = EXCLUDED.required_evidence_types,
 			required_approvals_count = EXCLUDED.required_approvals_count,
 			block_on_open_rejection = EXCLUDED.block_on_open_rejection,
 			require_candidate_for_approval = EXCLUDED.require_candidate_for_approval,
+			require_checklist_completion = EXCLUDED.require_checklist_completion,
 			snapshotted_at = now()
-		RETURNING release_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, snapshotted_at`,
-		releaseID, in.RequiredEvidenceTypes, in.RequiredApprovalsCount, in.BlockOnOpenRejection, in.RequireCandidateForApproval,
-	).Scan(&p.ReleaseID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.SnapshottedAt)
+		RETURNING release_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, require_checklist_completion, snapshotted_at`,
+		releaseID, in.RequiredEvidenceTypes, in.RequiredApprovalsCount, in.BlockOnOpenRejection, in.RequireCandidateForApproval, in.RequireChecklistCompletion,
+	).Scan(&p.ReleaseID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.RequireChecklistCompletion, &p.SnapshottedAt)
 	return p, err
 }
 
@@ -165,9 +166,9 @@ func (s *Store) UpsertPolicySnapshot(ctx context.Context, q dbx.Querier, release
 func (s *Store) GetPolicySnapshot(ctx context.Context, q dbx.Querier, releaseID uuid.UUID) (*PolicySnapshot, error) {
 	var p PolicySnapshot
 	err := q.QueryRow(ctx, `
-		SELECT release_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, snapshotted_at
+		SELECT release_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, require_checklist_completion, snapshotted_at
 		FROM release_policy_snapshots WHERE release_id = $1`, releaseID,
-	).Scan(&p.ReleaseID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.SnapshottedAt)
+	).Scan(&p.ReleaseID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.RequireChecklistCompletion, &p.SnapshottedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil

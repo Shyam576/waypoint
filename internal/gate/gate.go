@@ -17,6 +17,7 @@ import (
 
 	"github.com/Shyam576/waypoint/internal/approvals"
 	"github.com/Shyam576/waypoint/internal/candidates"
+	"github.com/Shyam576/waypoint/internal/checklists"
 	"github.com/Shyam576/waypoint/internal/evidence"
 	"github.com/Shyam576/waypoint/internal/projects"
 	"github.com/Shyam576/waypoint/internal/releases"
@@ -32,6 +33,11 @@ type Result struct {
 	ApprovedCount                 int        `json:"approved_count"`
 	MostRecentDecisionIsRejection bool       `json:"most_recent_decision_is_rejection"`
 	CurrentCandidateID            *uuid.UUID `json:"current_candidate_id,omitempty"`
+	// IncompleteChecklistItems lists the titles of required checklist
+	// items that are neither verified nor waived yet. Always populated
+	// for visibility; only actually blocks eligibility when the
+	// effective policy's RequireChecklistCompletion is set.
+	IncompleteChecklistItems []string `json:"incomplete_checklist_items,omitempty"`
 	// PolicySnapshotAt is set once this release has entered
 	// ready_for_production at least once: from that point on, this
 	// evaluation uses the policy as it was at that moment, not whatever
@@ -47,10 +53,11 @@ type Service struct {
 	approvals  *approvals.Store
 	projects   *projects.Store
 	candidates *candidates.Store
+	checklists *checklists.Store
 }
 
-func NewService(pool *pgxpool.Pool, releasesStore *releases.Store, evidenceStore *evidence.Store, approvalsStore *approvals.Store, projectsStore *projects.Store, candidatesStore *candidates.Store) *Service {
-	return &Service{pool: pool, releases: releasesStore, evidence: evidenceStore, approvals: approvalsStore, projects: projectsStore, candidates: candidatesStore}
+func NewService(pool *pgxpool.Pool, releasesStore *releases.Store, evidenceStore *evidence.Store, approvalsStore *approvals.Store, projectsStore *projects.Store, candidatesStore *candidates.Store, checklistsStore *checklists.Store) *Service {
+	return &Service{pool: pool, releases: releasesStore, evidence: evidenceStore, approvals: approvalsStore, projects: projectsStore, candidates: candidatesStore, checklists: checklistsStore}
 }
 
 // Evaluate computes production eligibility for one release. It performs
@@ -68,6 +75,7 @@ type effectivePolicy struct {
 	RequiredApprovalsCount      int
 	BlockOnOpenRejection        bool
 	RequireCandidateForApproval bool
+	RequireChecklistCompletion  bool
 }
 
 func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, error) {
@@ -85,6 +93,7 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		policy = effectivePolicy{
 			RequiredEvidenceTypes: snapshot.RequiredEvidenceTypes, RequiredApprovalsCount: snapshot.RequiredApprovalsCount,
 			BlockOnOpenRejection: snapshot.BlockOnOpenRejection, RequireCandidateForApproval: snapshot.RequireCandidateForApproval,
+			RequireChecklistCompletion: snapshot.RequireChecklistCompletion,
 		}
 		policySnapshotAt = &snapshot.SnapshottedAt
 	} else {
@@ -95,6 +104,7 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		policy = effectivePolicy{
 			RequiredEvidenceTypes: live.RequiredEvidenceTypes, RequiredApprovalsCount: live.RequiredApprovalsCount,
 			BlockOnOpenRejection: live.BlockOnOpenRejection, RequireCandidateForApproval: live.RequireCandidateForApproval,
+			RequireChecklistCompletion: live.RequireChecklistCompletion,
 		}
 	}
 	present, err := s.evidence.PresentTypes(ctx, s.pool, releaseID)
@@ -106,6 +116,10 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		return Result{}, err
 	}
 	currentCandidate, err := s.candidates.GetCurrentByRelease(ctx, s.pool, releaseID)
+	if err != nil {
+		return Result{}, err
+	}
+	checklistItems, err := s.checklists.ListByRelease(ctx, s.pool, releaseID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -170,6 +184,27 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		blockers = append(blockers, "the most recent approval decision on this release is a rejection; it must be resolved with a new approval before proceeding")
 	}
 
+	// A required checklist item counts as incomplete unless it has been
+	// verified or waived (a waiver is a deliberate, audited exception —
+	// see internal/checklists.Service.Waive — and counts as satisfying
+	// the requirement). This is always computed for visibility; it only
+	// becomes a blocker when the effective policy opts in. See
+	// docs/architecture-audit.md Finding 5.
+	var incomplete []string
+	for _, item := range checklistItems {
+		if !item.IsRequired {
+			continue
+		}
+		if item.Status != checklists.ItemVerified && item.Status != checklists.ItemWaived {
+			incomplete = append(incomplete, item.Title)
+		}
+	}
+	if policy.RequireChecklistCompletion {
+		for _, title := range incomplete {
+			blockers = append(blockers, "checklist item not verified: "+title)
+		}
+	}
+
 	return Result{
 		Eligible:                      len(blockers) == 0,
 		Blockers:                      blockers,
@@ -180,6 +215,7 @@ func (s *Service) Evaluate(ctx context.Context, releaseID uuid.UUID) (Result, er
 		ApprovedCount:                 approvedCount,
 		MostRecentDecisionIsRejection: mostRecentIsRejection,
 		CurrentCandidateID:            candidateID,
+		IncompleteChecklistItems:      incomplete,
 		PolicySnapshotAt:              policySnapshotAt,
 	}, nil
 }

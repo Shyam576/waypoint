@@ -91,6 +91,16 @@ func (s *Server) Router() http.Handler {
 			web.Post("/releases/{releaseID}/candidates", s.CandidatesHandlers.RegisterFromWeb)
 			web.Get("/releases/{releaseID}/candidates", s.CandidatesHandlers.ListByRelease)
 
+			web.Post("/projects/{projectID}/checklist-templates", s.ChecklistsHandlers.CreateTemplateVersion)
+			web.Get("/projects/{projectID}/checklist-templates/active", s.ChecklistsHandlers.GetActiveTemplate)
+			web.Get("/projects/{projectID}/checklist-templates", s.ChecklistsHandlers.ListTemplateVersions)
+
+			web.Get("/releases/{releaseID}/checklist-items", s.ChecklistsHandlers.ListByRelease)
+			web.Post("/checklist-items/{itemID}/owner", s.ChecklistsHandlers.AssignOwner)
+			web.Post("/checklist-items/{itemID}/verify", s.ChecklistsHandlers.Verify)
+			web.Post("/checklist-items/{itemID}/reject", s.ChecklistsHandlers.Reject)
+			web.Post("/checklist-items/{itemID}/waive", s.ChecklistsHandlers.Waive)
+
 			web.Post("/releases/{releaseID}/approvals", s.ApprovalsHandlers.Decide)
 			web.Get("/releases/{releaseID}/approvals", s.ApprovalsHandlers.ListByRelease)
 

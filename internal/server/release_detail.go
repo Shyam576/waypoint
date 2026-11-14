@@ -10,6 +10,7 @@ import (
 	"github.com/Shyam576/waypoint/internal/audit"
 	"github.com/Shyam576/waypoint/internal/authn"
 	"github.com/Shyam576/waypoint/internal/candidates"
+	"github.com/Shyam576/waypoint/internal/checklists"
 	"github.com/Shyam576/waypoint/internal/deployments"
 	"github.com/Shyam576/waypoint/internal/evidence"
 	"github.com/Shyam576/waypoint/internal/gate"
@@ -27,6 +28,7 @@ type ReleaseDetail struct {
 	Links           []releases.Link           `json:"links"`
 	Candidates      []candidates.Candidate    `json:"candidates"`
 	Evidence        []evidence.Evidence       `json:"evidence"`
+	ChecklistItems  []checklists.ReleaseItem  `json:"checklist_items"`
 	ChangeNotes     []mcpnotes.ChangeNote     `json:"change_notes"`
 	DesignDecisions []mcpnotes.DesignDecision `json:"design_decisions"`
 	Approvals       []approvals.Approval      `json:"approvals"`
@@ -66,6 +68,11 @@ func (s *Server) releaseDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ev, err := s.EvidenceStore.ListByRelease(r.Context(), s.Pool, id)
+	if err != nil {
+		httpx.Error(w, r, err)
+		return
+	}
+	checklistItems, err := s.ChecklistsStore.ListByRelease(r.Context(), s.Pool, id)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return
@@ -114,7 +121,8 @@ func (s *Server) releaseDetail(w http.ResponseWriter, r *http.Request) {
 
 	httpx.JSON(w, http.StatusOK, ReleaseDetail{
 		Release: rel, Links: nonNilLinks(links), Candidates: nonNilCandidates(cands), Evidence: nonNilEvidence(ev),
-		ChangeNotes: nonNilChangeNotes(changeNotes), DesignDecisions: nonNilDesignDecisions(designDecisions),
+		ChecklistItems: nonNilChecklistItems(checklistItems),
+		ChangeNotes:    nonNilChangeNotes(changeNotes), DesignDecisions: nonNilDesignDecisions(designDecisions),
 		Approvals: nonNilApprovals(apprs), Deployments: nonNilDeployments(deps), SupportItems: nonNilSupport(supportItems),
 		PendingMCP: nonNilSubmissions(pending), Eligibility: eligibility, Activity: nonNilActivity(activity),
 	})
@@ -135,6 +143,12 @@ func nonNilEvidence(v []evidence.Evidence) []evidence.Evidence {
 func nonNilCandidates(v []candidates.Candidate) []candidates.Candidate {
 	if v == nil {
 		return []candidates.Candidate{}
+	}
+	return v
+}
+func nonNilChecklistItems(v []checklists.ReleaseItem) []checklists.ReleaseItem {
+	if v == nil {
+		return []checklists.ReleaseItem{}
 	}
 	return v
 }

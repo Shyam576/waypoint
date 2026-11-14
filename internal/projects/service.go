@@ -14,19 +14,21 @@ import (
 
 	"github.com/Shyam576/waypoint/internal/audit"
 	"github.com/Shyam576/waypoint/internal/authn"
+	"github.com/Shyam576/waypoint/internal/checklists"
 	"github.com/Shyam576/waypoint/internal/httpx"
 	"github.com/Shyam576/waypoint/internal/users"
 )
 
 type Service struct {
-	pool    *pgxpool.Pool
-	store   *Store
-	audit   *audit.Store
-	usersSt *users.Store
+	pool       *pgxpool.Pool
+	store      *Store
+	audit      *audit.Store
+	usersSt    *users.Store
+	checklists *checklists.Store
 }
 
-func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, usersStore *users.Store) *Service {
-	return &Service{pool: pool, store: store, audit: auditStore, usersSt: usersStore}
+func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, usersStore *users.Store, checklistsStore *checklists.Store) *Service {
+	return &Service{pool: pool, store: store, audit: auditStore, usersSt: usersStore, checklists: checklistsStore}
 }
 
 var slugRe = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -98,6 +100,9 @@ func (s *Service) Create(ctx context.Context, identity authn.Identity, in Create
 				return Project{}, err
 			}
 			if err := s.store.AddMember(ctx, tx, p.ID, identity.User.ID); err != nil {
+				return Project{}, err
+			}
+			if err := s.checklists.SeedDefaultTemplate(ctx, tx, p.ID, &identity.User.ID); err != nil {
 				return Project{}, err
 			}
 			if err := s.audit.Record(ctx, tx, "project", p.ID, "project_created", identity.AuditActor(), nil, p, ""); err != nil {
@@ -199,6 +204,7 @@ type UpdatePolicyInput struct {
 	RequiredApprovalsCount      int
 	BlockOnOpenRejection        bool
 	RequireCandidateForApproval bool
+	RequireChecklistCompletion  bool
 }
 
 func (s *Service) UpdatePolicy(ctx context.Context, identity authn.Identity, projectID uuid.UUID, in UpdatePolicyInput) (Policy, error) {
@@ -229,7 +235,7 @@ func (s *Service) UpdatePolicy(ctx context.Context, identity authn.Identity, pro
 	}
 	defer tx.Rollback(ctx)
 
-	after, err := s.store.UpdatePolicy(ctx, tx, projectID, in.RequiredEvidenceTypes, in.RequiredApprovalsCount, in.BlockOnOpenRejection, in.RequireCandidateForApproval, identity.User.ID)
+	after, err := s.store.UpdatePolicy(ctx, tx, projectID, in.RequiredEvidenceTypes, in.RequiredApprovalsCount, in.BlockOnOpenRejection, in.RequireCandidateForApproval, in.RequireChecklistCompletion, identity.User.ID)
 	if err != nil {
 		return Policy{}, err
 	}
@@ -309,10 +315,10 @@ func (s *Service) CanManage(ctx context.Context, identity authn.Identity, projec
 // releases, or releases depending on this package's Policy type. Callers
 // that already hold a Release (and so have already proven project
 // visibility through it) are the only intended callers.
-func (s *Service) CurrentPolicy(ctx context.Context, projectID uuid.UUID) ([]string, int, bool, bool, error) {
+func (s *Service) CurrentPolicy(ctx context.Context, projectID uuid.UUID) ([]string, int, bool, bool, bool, error) {
 	p, err := s.store.GetPolicy(ctx, s.pool, projectID)
 	if err != nil {
-		return nil, 0, false, false, err
+		return nil, 0, false, false, false, err
 	}
-	return p.RequiredEvidenceTypes, p.RequiredApprovalsCount, p.BlockOnOpenRejection, p.RequireCandidateForApproval, nil
+	return p.RequiredEvidenceTypes, p.RequiredApprovalsCount, p.BlockOnOpenRejection, p.RequireCandidateForApproval, p.RequireChecklistCompletion, nil
 }

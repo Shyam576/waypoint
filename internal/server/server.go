@@ -11,6 +11,7 @@ import (
 	"github.com/Shyam576/waypoint/internal/audit"
 	"github.com/Shyam576/waypoint/internal/authn"
 	"github.com/Shyam576/waypoint/internal/candidates"
+	"github.com/Shyam576/waypoint/internal/checklists"
 	"github.com/Shyam576/waypoint/internal/config"
 	"github.com/Shyam576/waypoint/internal/deployments"
 	"github.com/Shyam576/waypoint/internal/evidence"
@@ -66,6 +67,10 @@ type Server struct {
 	CandidatesStore    *candidates.Store
 	CandidatesHandlers *candidates.Handlers
 
+	Checklists         *checklists.Service
+	ChecklistsStore    *checklists.Store
+	ChecklistsHandlers *checklists.Handlers
+
 	Dashboard *DashboardService
 }
 
@@ -81,13 +86,18 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Server {
 		AdminBootstrapToken: cfg.AdminBootstrapToken,
 	}
 
+	checklistsStore := checklists.NewStore()
+
 	projectsStore := projects.NewStore()
-	projectsSvc := projects.NewService(pool, projectsStore, auditStore, usersStore)
+	projectsSvc := projects.NewService(pool, projectsStore, auditStore, usersStore, checklistsStore)
 	projectsHandlers := projects.NewHandlers(projectsSvc)
 
 	releasesStore := releases.NewStore()
-	releasesSvc := releases.NewService(pool, releasesStore, auditStore, projectsSvc)
+	releasesSvc := releases.NewService(pool, releasesStore, auditStore, projectsSvc, checklistsStore)
 	releasesHandlers := releases.NewHandlers(releasesSvc)
+
+	checklistsSvc := checklists.NewService(pool, checklistsStore, auditStore, releasesSvc, projectsSvc)
+	checklistsHandlers := checklists.NewHandlers(checklistsSvc)
 
 	evidenceStore := evidence.NewStore()
 	evidenceSvc := evidence.NewService(pool, evidenceStore, auditStore, releasesSvc)
@@ -101,7 +111,7 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Server {
 	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc, candidatesStore)
 	approvalsHandlers := approvals.NewHandlers(approvalsSvc)
 
-	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore, candidatesStore)
+	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore, candidatesStore, checklistsStore)
 	gateHandlers := gate.NewHandlers(gateSvc, releasesSvc)
 
 	deploymentsStore := deployments.NewStore()
@@ -131,6 +141,7 @@ func New(cfg config.Config, pool *pgxpool.Pool) *Server {
 		Support: supportSvc, SupportStore: supportStore, SupportHandlers: supportHandlers,
 		MCPNotes: mcpNotesSvc, MCPNotesStore: mcpNotesStore, MCPNotesHandlers: mcpNotesHandlers,
 		Candidates: candidatesSvc, CandidatesStore: candidatesStore, CandidatesHandlers: candidatesHandlers,
+		Checklists: checklistsSvc, ChecklistsStore: checklistsStore, ChecklistsHandlers: checklistsHandlers,
 		Dashboard: dashboard,
 	}
 }

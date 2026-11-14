@@ -9,6 +9,7 @@ import (
 
 	"github.com/Shyam576/waypoint/internal/audit"
 	"github.com/Shyam576/waypoint/internal/authn"
+	"github.com/Shyam576/waypoint/internal/checklists"
 	"github.com/Shyam576/waypoint/internal/dbx"
 	"github.com/Shyam576/waypoint/internal/httpx"
 	"github.com/Shyam576/waypoint/internal/users"
@@ -25,18 +26,19 @@ type ProjectAccess interface {
 	// Transition can snapshot it onto a release entering
 	// ready_for_production without this package importing
 	// internal/projects for the Policy type.
-	CurrentPolicy(ctx context.Context, projectID uuid.UUID) (requiredEvidenceTypes []string, requiredApprovalsCount int, blockOnOpenRejection, requireCandidateForApproval bool, err error)
+	CurrentPolicy(ctx context.Context, projectID uuid.UUID) (requiredEvidenceTypes []string, requiredApprovalsCount int, blockOnOpenRejection, requireCandidateForApproval, requireChecklistCompletion bool, err error)
 }
 
 type Service struct {
-	pool     *pgxpool.Pool
-	store    *Store
-	audit    *audit.Store
-	projects ProjectAccess
+	pool       *pgxpool.Pool
+	store      *Store
+	audit      *audit.Store
+	projects   ProjectAccess
+	checklists *checklists.Store
 }
 
-func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, projectAccess ProjectAccess) *Service {
-	return &Service{pool: pool, store: store, audit: auditStore, projects: projectAccess}
+func NewService(pool *pgxpool.Pool, store *Store, auditStore *audit.Store, projectAccess ProjectAccess, checklistsStore *checklists.Store) *Service {
+	return &Service{pool: pool, store: store, audit: auditStore, projects: projectAccess, checklists: checklistsStore}
 }
 
 // canEdit mirrors project management rights: admins, and release
@@ -103,6 +105,12 @@ func (s *Service) Create(ctx context.Context, identity authn.Identity, projectID
 	if err := s.audit.Record(ctx, tx, "release", r.ID, "release_created", identity.AuditActor(), nil, r, ""); err != nil {
 		return Release{}, err
 	}
+	// Assigns the project's currently-active checklist template to this
+	// release, if it has one (a no-op for a project that has never
+	// defined one). See docs/architecture-audit.md Finding 5.
+	if _, err := s.checklists.MaterializeForRelease(ctx, tx, r.ID, projectID); err != nil {
+		return Release{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Release{}, err
 	}
@@ -137,6 +145,20 @@ func (s *Service) GetForService(ctx context.Context, identity authn.Identity, id
 // CanView/CanManage.
 func (s *Service) CanEdit(ctx context.Context, identity authn.Identity, projectID uuid.UUID) (bool, error) {
 	return s.canEdit(ctx, identity, projectID)
+}
+
+// ProjectIDForRelease returns the project a release belongs to, after
+// the same visibility check as Get/GetForService. It exists for
+// packages this package itself depends on (internal/checklists, for
+// materializing a release's checklist at creation time) so they can
+// check release visibility without importing this package's Release
+// type, which would create an import cycle.
+func (s *Service) ProjectIDForRelease(ctx context.Context, identity authn.Identity, id uuid.UUID) (uuid.UUID, error) {
+	r, err := s.Get(ctx, identity, id)
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+	return r.ProjectID, nil
 }
 
 func (s *Service) ListByProject(ctx context.Context, identity authn.Identity, projectID uuid.UUID, stage *Stage) ([]Release, error) {
@@ -228,13 +250,14 @@ func (s *Service) Transition(ctx context.Context, identity authn.Identity, id uu
 	// this release is held to. See docs/architecture-audit.md Finding 3.
 	var snapshotInput *PolicySnapshotInput
 	if to == StageReadyForProduction {
-		reqTypes, reqCount, blockReject, reqCandidate, err := s.projects.CurrentPolicy(ctx, before.ProjectID)
+		reqTypes, reqCount, blockReject, reqCandidate, reqChecklist, err := s.projects.CurrentPolicy(ctx, before.ProjectID)
 		if err != nil {
 			return Release{}, err
 		}
 		snapshotInput = &PolicySnapshotInput{
 			RequiredEvidenceTypes: reqTypes, RequiredApprovalsCount: reqCount,
 			BlockOnOpenRejection: blockReject, RequireCandidateForApproval: reqCandidate,
+			RequireChecklistCompletion: reqChecklist,
 		}
 	}
 

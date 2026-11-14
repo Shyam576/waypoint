@@ -44,6 +44,7 @@ type Policy struct {
 	RequiredApprovalsCount      int        `json:"required_approvals_count"`
 	BlockOnOpenRejection        bool       `json:"block_on_open_rejection"`
 	RequireCandidateForApproval bool       `json:"require_candidate_for_approval"`
+	RequireChecklistCompletion  bool       `json:"require_checklist_completion"`
 	UpdatedBy                   *uuid.UUID `json:"updated_by,omitempty"`
 	UpdatedAt                   time.Time  `json:"updated_at"`
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/Shyam576/waypoint/internal/audit"
 	"github.com/Shyam576/waypoint/internal/authn"
 	"github.com/Shyam576/waypoint/internal/candidates"
+	"github.com/Shyam576/waypoint/internal/checklists"
 	"github.com/Shyam576/waypoint/internal/dbx"
 	"github.com/Shyam576/waypoint/internal/deployments"
 	"github.com/Shyam576/waypoint/internal/evidence"
@@ -63,6 +64,7 @@ type harness struct {
 	releasesSvc    *releases.Service
 	evidenceSvc    *evidence.Service
 	candidatesSvc  *candidates.Service
+	checklistsSvc  *checklists.Service
 	approvalsSvc   *approvals.Service
 	gateSvc        *gate.Service
 	deploymentsSvc *deployments.Service
@@ -75,17 +77,19 @@ func newHarness(pool *pgxpool.Pool) *harness {
 	usersStore := users.NewStore()
 	authStore := authn.NewStore(pool)
 	authSvc := authn.NewService(authStore, usersStore, pool, time.Hour)
+	checklistsStore := checklists.NewStore()
 	projectsStore := projects.NewStore()
-	projectsSvc := projects.NewService(pool, projectsStore, auditStore, usersStore)
+	projectsSvc := projects.NewService(pool, projectsStore, auditStore, usersStore, checklistsStore)
 	releasesStore := releases.NewStore()
-	releasesSvc := releases.NewService(pool, releasesStore, auditStore, projectsSvc)
+	releasesSvc := releases.NewService(pool, releasesStore, auditStore, projectsSvc, checklistsStore)
+	checklistsSvc := checklists.NewService(pool, checklistsStore, auditStore, releasesSvc, projectsSvc)
 	evidenceStore := evidence.NewStore()
 	evidenceSvc := evidence.NewService(pool, evidenceStore, auditStore, releasesSvc)
 	candidatesStore := candidates.NewStore()
 	candidatesSvc := candidates.NewService(pool, candidatesStore, auditStore, releasesStore, releasesSvc)
 	approvalsStore := approvals.NewStore()
 	approvalsSvc := approvals.NewService(pool, approvalsStore, auditStore, releasesSvc, projectsSvc, candidatesStore)
-	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore, candidatesStore)
+	gateSvc := gate.NewService(pool, releasesStore, evidenceStore, approvalsStore, projectsStore, candidatesStore, checklistsStore)
 	deploymentsStore := deployments.NewStore()
 	deploymentsSvc := deployments.NewService(pool, deploymentsStore, auditStore, gateSvc, releasesStore, releasesSvc, releasesSvc, projectsSvc, candidatesStore, 15*time.Minute)
 	supportStore := support.NewStore()
@@ -95,7 +99,8 @@ func newHarness(pool *pgxpool.Pool) *harness {
 
 	return &harness{
 		pool: pool, usersStore: usersStore, authSvc: authSvc, projectsSvc: projectsSvc, releasesSvc: releasesSvc,
-		evidenceSvc: evidenceSvc, candidatesSvc: candidatesSvc, approvalsSvc: approvalsSvc, gateSvc: gateSvc,
+		checklistsSvc: checklistsSvc,
+		evidenceSvc:   evidenceSvc, candidatesSvc: candidatesSvc, approvalsSvc: approvalsSvc, gateSvc: gateSvc,
 		deploymentsSvc: deploymentsSvc, supportSvc: supportSvc, mcpNotesSvc: mcpNotesSvc,
 	}
 }
@@ -807,5 +812,202 @@ func TestGateUsesPolicySnapshotNotLivePolicyAfterReadyForProduction(t *testing.T
 	}
 	if !result.Eligible {
 		t.Errorf("expected the release to be eligible again with 0 required approvals, blockers: %v", result.Blockers)
+	}
+}
+
+func TestChecklistDefaultTemplateMaterializedOnReleaseCreation(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	proj := h.createProject(t, ctx, admin, dev)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+
+	items, err := h.checklistsSvc.ListByRelease(ctx, dev, rel.ID)
+	if err != nil {
+		t.Fatalf("list checklist items: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("expected the project's default checklist template to be materialized onto the release")
+	}
+	categories := map[checklists.Category]int{}
+	for _, it := range items {
+		if it.Status != checklists.ItemPending {
+			t.Errorf("expected a freshly materialized item to start pending, got %s for %q", it.Status, it.Title)
+		}
+		categories[it.Category]++
+	}
+	for _, cat := range []checklists.Category{checklists.CategoryDevelopment, checklists.CategoryUAT, checklists.CategoryProductionReadiness, checklists.CategoryPostDeployment} {
+		if categories[cat] == 0 {
+			t.Errorf("expected at least one default item in category %s", cat)
+		}
+	}
+}
+
+func TestChecklistItemLifecycle(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	proj := h.createProject(t, ctx, admin, dev)
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+
+	items, err := h.checklistsSvc.ListByRelease(ctx, dev, rel.ID)
+	if err != nil || len(items) < 2 {
+		t.Fatalf("expected at least 2 default items, got %d items, err=%v", len(items), err)
+	}
+	toVerify, toReject := items[0], items[1]
+
+	verified, err := h.checklistsSvc.Verify(ctx, dev, toVerify.ID, "https://ci.example/build/42")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if verified.Status != checklists.ItemVerified || verified.EvidenceRef != "https://ci.example/build/42" || verified.DecidedBy == nil {
+		t.Errorf("unexpected verified item state: %+v", verified)
+	}
+
+	if _, err := h.checklistsSvc.Reject(ctx, dev, toReject.ID, ""); err == nil {
+		t.Error("expected rejecting with no reason to fail")
+	}
+	rejected, err := h.checklistsSvc.Reject(ctx, dev, toReject.ID, "not actually done yet")
+	if err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if rejected.Status != checklists.ItemRejected || rejected.RejectionReason != "not actually done yet" {
+		t.Errorf("unexpected rejected item state: %+v", rejected)
+	}
+
+	// Waiving (a controlled exception) requires project management
+	// permission, not just edit permission.
+	if _, err := h.checklistsSvc.Waive(ctx, dev, toReject.ID, "not applicable to this release"); err == nil {
+		t.Error("expected a developer (non-admin, non-coordinator) to be forbidden from waiving a checklist item")
+	}
+	waived, err := h.checklistsSvc.Waive(ctx, admin, toReject.ID, "not applicable to this release")
+	if err != nil {
+		t.Fatalf("waive: %v", err)
+	}
+	if waived.Status != checklists.ItemWaived || waived.WaiverReason != "not applicable to this release" {
+		t.Errorf("unexpected waived item state: %+v", waived)
+	}
+
+	otherDev := h.createUser(t, ctx, users.RoleDeveloper)
+	assigned, err := h.checklistsSvc.AssignOwner(ctx, dev, toVerify.ID, otherDev.User.ID)
+	if err != nil {
+		t.Fatalf("assign owner: %v", err)
+	}
+	if assigned.OwnerID == nil || *assigned.OwnerID != otherDev.User.ID {
+		t.Errorf("expected owner to be assigned, got %+v", assigned.OwnerID)
+	}
+}
+
+func TestChecklistTemplateVersioningRetainedByRelease(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	proj := h.createProject(t, ctx, admin, dev)
+
+	relV1 := h.createRelease(t, ctx, dev, proj.ID)
+	itemsV1, err := h.checklistsSvc.ListByRelease(ctx, dev, relV1.ID)
+	if err != nil {
+		t.Fatalf("list v1 items: %v", err)
+	}
+	if len(itemsV1) == 0 {
+		t.Fatal("expected the default template's items on the first release")
+	}
+
+	newTemplate, err := h.checklistsSvc.CreateTemplateVersion(ctx, admin, proj.ID, []checklists.TemplateItemInput{
+		{Category: checklists.CategoryDevelopment, Title: "Custom v2 item", IsRequired: true, VerificationMethod: checklists.MethodHumanAttestation},
+	})
+	if err != nil {
+		t.Fatalf("create new template version: %v", err)
+	}
+	if newTemplate.Version != 2 {
+		t.Errorf("expected the new template to be version 2, got %d", newTemplate.Version)
+	}
+
+	relV2 := h.createRelease(t, ctx, dev, proj.ID)
+	itemsV2, err := h.checklistsSvc.ListByRelease(ctx, dev, relV2.ID)
+	if err != nil {
+		t.Fatalf("list v2 items: %v", err)
+	}
+	if len(itemsV2) != 1 || itemsV2[0].Title != "Custom v2 item" {
+		t.Errorf("expected the new release to get exactly the new template's 1 item, got %+v", itemsV2)
+	}
+
+	// The first release keeps whatever it was assigned, unaffected by the
+	// new template version.
+	itemsV1Again, err := h.checklistsSvc.ListByRelease(ctx, dev, relV1.ID)
+	if err != nil {
+		t.Fatalf("re-list v1 items: %v", err)
+	}
+	if len(itemsV1Again) != len(itemsV1) {
+		t.Errorf("expected the first release's checklist to be unaffected by the new template version, had %d items, now %d", len(itemsV1), len(itemsV1Again))
+	}
+}
+
+func TestGateRequiresChecklistCompletionWhenPolicyEnabled(t *testing.T) {
+	ctx, pool := setup(t)
+	h := newHarness(pool)
+	admin := h.createUser(t, ctx, users.RoleAdmin)
+	dev := h.createUser(t, ctx, users.RoleDeveloper)
+	approver := h.createUser(t, ctx, users.RoleApprover)
+	proj := h.createProject(t, ctx, admin, dev, approver)
+
+	policy, err := h.projectsSvc.GetPolicy(ctx, admin, proj.ID)
+	if err != nil {
+		t.Fatalf("get policy: %v", err)
+	}
+	if _, err := h.projectsSvc.UpdatePolicy(ctx, admin, proj.ID, projects.UpdatePolicyInput{
+		RequiredEvidenceTypes: policy.RequiredEvidenceTypes, RequiredApprovalsCount: policy.RequiredApprovalsCount,
+		BlockOnOpenRejection: policy.BlockOnOpenRejection, RequireChecklistCompletion: true,
+	}); err != nil {
+		t.Fatalf("enable require_checklist_completion: %v", err)
+	}
+
+	rel := h.createRelease(t, ctx, dev, proj.ID)
+	h.advanceToReadyForProduction(t, ctx, dev, rel.ID)
+	for _, typ := range []evidence.Type{evidence.TypeChangeSummary, evidence.TypeTestResults, evidence.TypeUATSignoff, evidence.TypeRollbackPlan} {
+		if _, err := h.evidenceSvc.Submit(ctx, dev, rel.ID, typ, string(typ), "ok", nil); err != nil {
+			t.Fatalf("submit evidence: %v", err)
+		}
+	}
+	if _, err := h.approvalsSvc.Decide(ctx, approver, rel.ID, approvals.DecisionApproved, "go"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	result, err := h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if result.Eligible {
+		t.Fatal("expected the gate to block on incomplete required checklist items")
+	}
+	if len(result.IncompleteChecklistItems) == 0 {
+		t.Error("expected IncompleteChecklistItems to list the outstanding items")
+	}
+
+	items, err := h.checklistsSvc.ListByRelease(ctx, dev, rel.ID)
+	if err != nil {
+		t.Fatalf("list items: %v", err)
+	}
+	for _, it := range items {
+		if !it.IsRequired {
+			continue
+		}
+		if _, err := h.checklistsSvc.Verify(ctx, dev, it.ID, ""); err != nil {
+			t.Fatalf("verify item %q: %v", it.Title, err)
+		}
+	}
+
+	result, err = h.gateSvc.Evaluate(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if !result.Eligible {
+		t.Fatalf("expected the gate to be eligible once every required checklist item is verified, blockers: %v", result.Blockers)
+	}
+	if len(result.IncompleteChecklistItems) != 0 {
+		t.Errorf("expected no incomplete checklist items, got %v", result.IncompleteChecklistItems)
 	}
 }

@@ -125,6 +125,7 @@ type PolicySnapshotInput struct {
 	RequiredApprovalsCount      int
 	BlockOnOpenRejection        bool
 	RequireCandidateForApproval bool
+	RequireChecklistCompletion  bool
 }
 
 // PolicySnapshot is the frozen policy internal/gate reads once a release
@@ -136,5 +137,6 @@ type PolicySnapshot struct {
 	RequiredApprovalsCount      int       `json:"required_approvals_count"`
 	BlockOnOpenRejection        bool      `json:"block_on_open_rejection"`
 	RequireCandidateForApproval bool      `json:"require_candidate_for_approval"`
+	RequireChecklistCompletion  bool      `json:"require_checklist_completion"`
 	SnapshottedAt               time.Time `json:"snapshotted_at"`
 }
