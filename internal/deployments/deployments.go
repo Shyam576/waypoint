@@ -162,14 +162,17 @@ func (s *Store) ListByRelease(ctx context.Context, q dbx.Querier, releaseID uuid
 	return out, rows.Err()
 }
 
-// ListRecent returns the most recent deployments across every release
-// the caller can see, for the dashboard's "recent deployments" panel.
-func (s *Store) ListRecent(ctx context.Context, q dbx.Querier, projectIDs []uuid.UUID, limit int) ([]Deployment, error) {
+// deploymentJoinedColumns is deploymentColumns qualified for a query
+// that joins deployments to releases (to filter by project), in the
+// same order, so scanDeployment can be reused unchanged.
+const deploymentJoinedColumns = `d.id, d.release_id, d.environment, d.artifact_digest, d.artifact_ref, d.commit_sha, d.workflow_run_url, d.result, d.recorded_via, d.recorded_by, d.recorded_by_ci_token_id, d.authorization_id, d.occurred_at, d.created_at, d.verification_status, d.verified_by, d.verified_via, d.verified_at, d.verification_note`
+
+func (s *Store) queryJoined(ctx context.Context, q dbx.Querier, extraWhere string, projectIDs []uuid.UUID, limit int) ([]Deployment, error) {
 	rows, err := q.Query(ctx, `
-		SELECT d.id, d.release_id, d.environment, d.artifact_digest, d.artifact_ref, d.commit_sha, d.workflow_run_url, d.result, d.recorded_via, d.recorded_by, d.recorded_by_ci_token_id, d.authorization_id, d.occurred_at, d.created_at
+		SELECT `+deploymentJoinedColumns+`
 		FROM deployments d
 		JOIN releases r ON r.id = d.release_id
-		WHERE r.project_id = ANY($1)
+		WHERE r.project_id = ANY($1)`+extraWhere+`
 		ORDER BY d.occurred_at DESC
 		LIMIT $2`, projectIDs, limit)
 	if err != nil {
@@ -185,6 +188,27 @@ func (s *Store) ListRecent(ctx context.Context, q dbx.Querier, projectIDs []uuid
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// ListRecent returns the most recent deployments across every release
+// the caller can see, for the dashboard's "recent deployments" panel.
+func (s *Store) ListRecent(ctx context.Context, q dbx.Querier, projectIDs []uuid.UUID, limit int) ([]Deployment, error) {
+	return s.queryJoined(ctx, q, "", projectIDs, limit)
+}
+
+// ListFailed returns the most recent deployments whose own result was
+// failure, across every project the caller can see, for the
+// dashboard's "failed deployments" panel.
+func (s *Store) ListFailed(ctx context.Context, q dbx.Querier, projectIDs []uuid.UUID, limit int) ([]Deployment, error) {
+	return s.queryJoined(ctx, q, " AND d.result = 'failure'", projectIDs, limit)
+}
+
+// ListAwaitingVerification returns the most recent successful
+// deployments whose verification_status is still pending — the deploy
+// step exited 0, but nobody has yet confirmed the application is
+// actually healthy. See docs/architecture-audit.md Finding 12.
+func (s *Store) ListAwaitingVerification(ctx context.Context, q dbx.Querier, projectIDs []uuid.UUID, limit int) ([]Deployment, error) {
+	return s.queryJoined(ctx, q, " AND d.result = 'success' AND d.verification_status = 'pending'", projectIDs, limit)
 }
 
 type ReleaseAccess interface {
