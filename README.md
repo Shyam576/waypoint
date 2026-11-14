@@ -22,6 +22,7 @@ for what is intentionally simplified.
 - [Release candidates and artifact integrity](#release-candidates-and-artifact-integrity)
 - [Structured go-live checklists](#structured-go-live-checklists)
 - [High-risk and payment change controls](#high-risk-and-payment-change-controls)
+- [Security hardening](#security-hardening)
 - [GitHub Actions integration](#github-actions-integration)
 - [Claude Code / MCP setup](#claude-code--mcp-setup)
 - [Environment variables](#environment-variables)
@@ -433,6 +434,43 @@ read by nothing.
 Closes [`docs/architecture-audit.md`](docs/architecture-audit.md)
 Finding 4.
 
+## Security hardening
+
+A set of six independent fixes from `docs/architecture-audit.md`'s
+Phase One findings:
+
+- **Token expiry** (Finding 6). MCP and CI tokens now carry
+  `expires_at`, set at issuance from `WAYPOINT_MCP_TOKEN_TTL_DAYS`
+  (default 180) / `WAYPOINT_CI_TOKEN_TTL_DAYS` (default 90). A token
+  issued before this existed keeps working (`expires_at` is `NULL` for
+  it); every token issued from now on has a bounded lifetime and is
+  rejected once expired, the same way a revoked token already is.
+- **Rate limiting** (Finding 8). `POST /auth/login` and
+  `POST /bootstrap/admin` are limited to
+  `WAYPOINT_AUTH_RATE_LIMIT_PER_MINUTE` (default 10) requests per
+  client IP per minute (`internal/ratelimit`, standard library only, no
+  new dependency) — see Limitations for its scope.
+- **Configurable separation of duties** (Finding 9).
+  `policy.require_approver_not_submitter` (default `false`): when set,
+  an approver who submitted evidence for a release cannot also approve
+  it, on top of the always-on "not the release's own owner" rule.
+- **Password management and user deactivation** (Finding 10).
+  `POST /api/v1/auth/change-password` (self-service; requires the
+  current password; invalidates the user's other sessions),
+  `POST /api/v1/users/{id}/password` (admin-set, no current-password
+  check — there's no email infrastructure in this MVP, so the admin
+  communicates the new password out of band), and
+  `PATCH /api/v1/users/{id}/status` (admin activate/deactivate; an
+  admin cannot deactivate their own account).
+- **Row locking during deployment recording** (Finding 11).
+  `gate.Service.EvaluateTx` lets the gate check run inside an existing
+  transaction; `deployments.Service.record` now takes a row lock on the
+  release (`SELECT ... FOR UPDATE`) and re-evaluates the gate inside
+  the same transaction as the deployment insert, closing the gap
+  between "the gate said eligible" and "the deployment got recorded."
+- **Constant-time bootstrap token comparison** (Finding 13).
+  `crypto/subtle.ConstantTimeCompare` instead of `!=`.
+
 ## GitHub Actions integration
 
 See [`deploy/github-actions/deploy.yml`](deploy/github-actions/deploy.yml)
@@ -527,6 +565,9 @@ real secrets are committed anywhere in this repository.
 | `WAYPOINT_CORS_ORIGIN` | api | allowed origin (not needed in the Docker Compose setup, where the browser never calls the API cross-origin) |
 | `ADMIN_BOOTSTRAP_TOKEN` | api | enables the one-time `/bootstrap/admin` endpoint; unset disables it |
 | `WAYPOINT_DEPLOY_AUTH_TTL_SECONDS` | api | how long a minted deployment authorization stays valid before it must be re-issued; default `900` (15 min), max `3600` |
+| `WAYPOINT_MCP_TOKEN_TTL_DAYS` | api | MCP token lifetime at issuance; default `180` |
+| `WAYPOINT_CI_TOKEN_TTL_DAYS` | api | CI token lifetime at issuance; default `90` |
+| `WAYPOINT_AUTH_RATE_LIMIT_PER_MINUTE` | api | max `/auth/login` or `/bootstrap/admin` attempts per client IP per minute; default `10` |
 | `WAYPOINT_API_URL` | web (build-time) | backend URL the Next.js proxy forwards to |
 | `WAYPOINT_API_BASE_URL`, `WAYPOINT_MCP_TOKEN` | cmd/mcp | backend URL + the developer's MCP token |
 
@@ -625,3 +666,25 @@ silently assumed:
   [`docs/deployment-security.md`](docs/deployment-security.md). Nothing
   in this codebase can prevent a deployment that never calls Waypoint's
   API at all; it can only make the API path the correct, auditable one.
+- **The rate limiter is in-process, per-replica, and never evicts
+  entries.** It does not coordinate across multiple API instances, and
+  its per-IP map grows for as long as the process runs. Acceptable for
+  this MVP's single-instance, internal-tool deployment model; a
+  multi-replica or internet-facing deployment would need a shared store
+  (e.g. Redis) and an eviction policy.
+- **Token expiry has no rotation workflow or UI.** `expires_at` is
+  stored and enforced, and returned by the existing
+  `GET /users/{id}/mcp-tokens` / `GET /projects/{id}/ci-tokens`
+  endpoints, but nothing proactively warns a user or pipeline before a
+  token expires, and no frontend surfaces token age — "surfaced in the
+  UI," from the roadmap, was not done this pass.
+- **The deployment-recording row lock (Finding 11) is not covered by a
+  dedicated race-reproduction test.** It's verified structurally (code
+  review) and indirectly (the existing concurrent-authorization test
+  still passes under `-race`), but the specific TOCTOU window it closes
+  — a concurrent approval change landing between the gate check and the
+  deployment insert — is too narrow to reproduce deterministically
+  without a flaky, timing-dependent test.
+- **Admin-set and self-service password changes have no complexity
+  policy beyond an 8-character minimum**, and there is no forced
+  rotation or reuse prevention.

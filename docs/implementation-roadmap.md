@@ -137,14 +137,42 @@ Every new project is seeded with a sensible default risk policy (high:
 risk acceptance) so the feature works without extra setup, the same
 convention as the checklist template default in item 4.
 
-**6. Security hardening pass (closes Findings 6, 8, 9, 10, 11, 13).**
-Complexity: M, but it's six small, independent changes rather than one
-large one — can be split across several focused PRs.
-Token expiry + rotation surfaced in the UI; rate limiting on
-`/auth/login` and `/bootstrap/admin`; configurable separation-of-duties
-policy (beyond "not the owner"); password reset/change and user
-deactivation endpoints; `SELECT ... FOR UPDATE` on the release row during
-deployment recording; constant-time bootstrap token comparison.
+**6. Security hardening pass (closes Findings 6, 8, 9, 10, 11, 13). — DONE.**
+All six landed as independent changes:
+- **Finding 6**: `mcp_tokens`/`ci_tokens` gain `expires_at`
+  (`WAYPOINT_MCP_TOKEN_TTL_DAYS` default 180,
+  `WAYPOINT_CI_TOKEN_TTL_DAYS` default 90); a token issued before this
+  migration keeps working (`expires_at IS NULL`), every token issued
+  from now on has a bounded lifetime. "Rotation surfaced in the UI" is
+  not done — `expires_at` is returned by the existing list endpoints,
+  but no frontend work happened this pass; see Limitations.
+- **Finding 8**: `internal/ratelimit`, a minimal stdlib-only per-IP fixed
+  window limiter (`WAYPOINT_AUTH_RATE_LIMIT_PER_MINUTE`, default 10) on
+  `POST /auth/login` and `POST /bootstrap/admin`.
+- **Finding 9**: `policy.require_approver_not_submitter` (default
+  `false`): when set, an approver who submitted evidence for a release
+  cannot also approve it — enforced live at decision time (not frozen
+  into the policy snapshot, since it's an authorization check on the
+  approver, the same way "not the release owner" already is, not a gate
+  eligibility requirement).
+- **Finding 10**: `POST /auth/change-password` (self-service, requires
+  current password, invalidates the user's other sessions),
+  `POST /users/{id}/password` (admin-set, no current-password check),
+  `PATCH /users/{id}/status` (admin activate/deactivate — takes effect
+  immediately since session/token resolution already checks
+  `is_active`; blocks deactivating your own account).
+- **Finding 11**: `gate.Service.EvaluateTx` (the same `Evaluate` logic,
+  parameterized over the querier) + `releases.Store.LockForUpdate`;
+  `deployments.Service.record` now locks the release row and
+  re-evaluates the gate inside the same transaction as the deployment
+  insert, closing the gap between "the gate said eligible" and "the
+  deployment got recorded." Verified structurally and via the existing
+  concurrent-authorization test continuing to pass; a dedicated
+  race-reproduction test was not written (see README Limitations for
+  why — the race window this closes is too narrow to reproduce
+  deterministically without a flaky, timing-dependent test).
+- **Finding 13**: `crypto/subtle.ConstantTimeCompare` for the bootstrap
+  token check.
 
 ## Depends on the above — do next
 
