@@ -21,6 +21,11 @@ import (
 type ProjectAccess interface {
 	CanView(ctx context.Context, identity authn.Identity, projectID uuid.UUID) (bool, error)
 	CanManage(ctx context.Context, identity authn.Identity, projectID uuid.UUID) (bool, error)
+	// CurrentPolicy returns the project's live policy as plain values, so
+	// Transition can snapshot it onto a release entering
+	// ready_for_production without this package importing
+	// internal/projects for the Policy type.
+	CurrentPolicy(ctx context.Context, projectID uuid.UUID) (requiredEvidenceTypes []string, requiredApprovalsCount int, blockOnOpenRejection, requireCandidateForApproval bool, err error)
 }
 
 type Service struct {
@@ -215,6 +220,24 @@ func (s *Service) Transition(ctx context.Context, identity authn.Identity, id uu
 		supportEndsAt = &t
 	}
 
+	// Entering ready_for_production freezes the project's current policy
+	// onto this release (re-freezing it on a later re-entry, e.g. after
+	// being sent back to uat for fixes); internal/gate prefers this
+	// snapshot over the live project policy from here on, so an edit to
+	// the project's policy afterward can no longer silently change what
+	// this release is held to. See docs/architecture-audit.md Finding 3.
+	var snapshotInput *PolicySnapshotInput
+	if to == StageReadyForProduction {
+		reqTypes, reqCount, blockReject, reqCandidate, err := s.projects.CurrentPolicy(ctx, before.ProjectID)
+		if err != nil {
+			return Release{}, err
+		}
+		snapshotInput = &PolicySnapshotInput{
+			RequiredEvidenceTypes: reqTypes, RequiredApprovalsCount: reqCount,
+			BlockOnOpenRejection: blockReject, RequireCandidateForApproval: reqCandidate,
+		}
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Release{}, err
@@ -227,6 +250,15 @@ func (s *Service) Transition(ctx context.Context, identity authn.Identity, id uu
 	}
 	if err := s.audit.Record(ctx, tx, "release", id, "stage_transition", identity.AuditActor(), before.Stage, after.Stage, reason); err != nil {
 		return Release{}, err
+	}
+	if snapshotInput != nil {
+		snap, err := s.store.UpsertPolicySnapshot(ctx, tx, id, *snapshotInput)
+		if err != nil {
+			return Release{}, err
+		}
+		if err := s.audit.Record(ctx, tx, "release", id, "policy_snapshot_taken", identity.AuditActor(), nil, snap, ""); err != nil {
+			return Release{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Release{}, err

@@ -2,6 +2,7 @@ package releases
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -137,4 +138,41 @@ func (s *Store) ListLinks(ctx context.Context, q dbx.Querier, releaseID uuid.UUI
 		out = append(out, l)
 	}
 	return out, rows.Err()
+}
+
+// UpsertPolicySnapshot records (or re-records, on a later re-entry into
+// ready_for_production) the policy snapshot for one release.
+func (s *Store) UpsertPolicySnapshot(ctx context.Context, q dbx.Querier, releaseID uuid.UUID, in PolicySnapshotInput) (PolicySnapshot, error) {
+	var p PolicySnapshot
+	err := q.QueryRow(ctx, `
+		INSERT INTO release_policy_snapshots (release_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (release_id) DO UPDATE SET
+			required_evidence_types = EXCLUDED.required_evidence_types,
+			required_approvals_count = EXCLUDED.required_approvals_count,
+			block_on_open_rejection = EXCLUDED.block_on_open_rejection,
+			require_candidate_for_approval = EXCLUDED.require_candidate_for_approval,
+			snapshotted_at = now()
+		RETURNING release_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, snapshotted_at`,
+		releaseID, in.RequiredEvidenceTypes, in.RequiredApprovalsCount, in.BlockOnOpenRejection, in.RequireCandidateForApproval,
+	).Scan(&p.ReleaseID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.SnapshottedAt)
+	return p, err
+}
+
+// GetPolicySnapshot returns the release's policy snapshot, or (nil, nil)
+// if it has never entered ready_for_production (so no snapshot exists
+// yet and the live project policy still applies).
+func (s *Store) GetPolicySnapshot(ctx context.Context, q dbx.Querier, releaseID uuid.UUID) (*PolicySnapshot, error) {
+	var p PolicySnapshot
+	err := q.QueryRow(ctx, `
+		SELECT release_id, required_evidence_types, required_approvals_count, block_on_open_rejection, require_candidate_for_approval, snapshotted_at
+		FROM release_policy_snapshots WHERE release_id = $1`, releaseID,
+	).Scan(&p.ReleaseID, &p.RequiredEvidenceTypes, &p.RequiredApprovalsCount, &p.BlockOnOpenRejection, &p.RequireCandidateForApproval, &p.SnapshottedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &p, nil
 }

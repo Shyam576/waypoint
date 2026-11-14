@@ -114,3 +114,27 @@ type Link struct {
 	CreatedBy uuid.UUID `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+// PolicySnapshotInput is the shape of a project policy captured onto a
+// release. Defined here (rather than importing internal/projects.Policy)
+// so this package doesn't need to depend on the projects package; the
+// ProjectAccess interface below asks for these fields as plain values,
+// and internal/projects.Service.CurrentPolicy supplies them.
+type PolicySnapshotInput struct {
+	RequiredEvidenceTypes       []string
+	RequiredApprovalsCount      int
+	BlockOnOpenRejection        bool
+	RequireCandidateForApproval bool
+}
+
+// PolicySnapshot is the frozen policy internal/gate reads once a release
+// has entered ready_for_production at least once. See
+// migrations/0011_release_policy_snapshots.sql.
+type PolicySnapshot struct {
+	ReleaseID                   uuid.UUID `json:"release_id"`
+	RequiredEvidenceTypes       []string  `json:"required_evidence_types"`
+	RequiredApprovalsCount      int       `json:"required_approvals_count"`
+	BlockOnOpenRejection        bool      `json:"block_on_open_rejection"`
+	RequireCandidateForApproval bool      `json:"require_candidate_for_approval"`
+	SnapshottedAt               time.Time `json:"snapshotted_at"`
+}

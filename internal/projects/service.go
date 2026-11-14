@@ -302,3 +302,17 @@ func (s *Service) CanView(ctx context.Context, identity authn.Identity, projectI
 func (s *Service) CanManage(ctx context.Context, identity authn.Identity, projectID uuid.UUID) (bool, error) {
 	return s.canManage(ctx, identity, projectID)
 }
+
+// CurrentPolicy returns the project's live policy as plain values, with
+// no authorization check of its own: it exists so internal/releases can
+// snapshot a policy onto a release without this package depending on
+// releases, or releases depending on this package's Policy type. Callers
+// that already hold a Release (and so have already proven project
+// visibility through it) are the only intended callers.
+func (s *Service) CurrentPolicy(ctx context.Context, projectID uuid.UUID) ([]string, int, bool, bool, error) {
+	p, err := s.store.GetPolicy(ctx, s.pool, projectID)
+	if err != nil {
+		return nil, 0, false, false, err
+	}
+	return p.RequiredEvidenceTypes, p.RequiredApprovalsCount, p.BlockOnOpenRejection, p.RequireCandidateForApproval, nil
+}
